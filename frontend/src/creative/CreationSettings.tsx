@@ -4,7 +4,7 @@ import { videoModel, videoUpscalers } from './upscale'
 import { videoMode } from './references'
 
 function Segments({ label, values, value, change }: { label: string; values: string[]; value?: string; change: (v: string) => void }) {
-  return <div className="cc-setting"><span>{label}</span><div className="cc-segments">{values.map(v => <button type="button" className={value === v ? 'active' : ''} key={v} onClick={() => change(v)}>{v}</button>)}</div></div>
+  return <div className="cc-setting"><span>{label}</span><div className="cc-segments">{values.map(v => <button type="button" className={value === v ? 'active' : ''} key={v} onClick={() => { if (value !== v) change(v) }}>{v}</button>)}</div></div>
 }
 
 export default function CreationSettings({data,update,videoUpscale=false,referenceCount=0}:{data:CardData;update:(v:Partial<CardData>)=>void;videoUpscale?:boolean;referenceCount?:number}){

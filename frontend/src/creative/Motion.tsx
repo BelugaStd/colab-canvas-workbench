@@ -19,7 +19,7 @@ export function useDismiss(active: boolean, close: () => void) {
   const latest = useRef(close); latest.current = close
   useEffect(() => {
     if (!active) return
-    const key = (e: KeyboardEvent) => { if (e.key==='Escape' && !document.querySelector('[role="listbox"]')) latest.current() }
+    const key = (e: KeyboardEvent) => { if (e.key==='Escape' && !e.isComposing && !document.querySelector('[role="listbox"]')) latest.current() }
     window.addEventListener('keydown', key)
     return () => window.removeEventListener('keydown', key)
   }, [active])
