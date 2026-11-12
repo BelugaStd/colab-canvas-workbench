@@ -24,12 +24,16 @@ def image_info(path):
         if image.format not in {"PNG", "JPEG", "WEBP"}:
             raise ValueError("图片只支持 PNG、JPEG 和 WebP")
         width, height = image.size
+        orientation = image.getexif().get(274,1)
+        if orientation in {5,6,7,8}:
+            width,height = height,width
         if width * height > 40_000_000:
             raise ValueError("图片不能超过 4000 万像素")
         ext, media_type = {"PNG": (".png", "image/png"), "JPEG": (".jpg", "image/jpeg"),
                            "WEBP": (".webp", "image/webp")}[image.format]
-        image.verify()
-    return {"extension": ext, "media_type": media_type, "width": width, "height": height}
+    with Image.open(path) as validation:
+        validation.verify()
+    return {"extension": ext, "media_type": media_type, "width": width, "height": height, "orientation":orientation}
 
 
 async def inspect_media(path):

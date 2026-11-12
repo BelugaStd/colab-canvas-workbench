@@ -209,16 +209,26 @@ class Manager:
                         self.log(account, "ComfyUI 已连接，可提交工作流")
                         self.ensure_worker(account)
                         return
-                    except (aiohttp.ClientError, TimeoutError, RuntimeError):
+                    except (aiohttp.ClientError, TimeoutError, RuntimeError, OSError):
                         pass
                     if time.monotonic() - last_check > 12:
-                        output = await self.colab.execute(account, session, check)
+                        last_check = time.monotonic()
+                        try:
+                            output = await self.colab.execute(account, session, check)
+                        except (TimeoutError, OSError, RuntimeError) as exc:
+                            self.log(account, f'部署状态暂时无法读取，保留原会话继续等待：{type(exc).__name__}: {exc}')
+                            self.machine(account, message='部署状态暂时不可达，等待原 GPU 恢复；未重复部署')
+                            await asyncio.sleep(3)
+                            continue
                         for line in output.splitlines():
                             if line.startswith("WB_STATUS:"):
                                 status = json.loads(line.removeprefix("WB_STATUS:"))
                                 if status.get("phase") == "error":
                                     raise RuntimeError(status.get("message", "部署失败") + "\n" + output[-2500:])
                                 self.machine(account, message=status.get("message", "等待部署"), deployment=status)
+                                if status.get('phase') == 'ready':
+                                    port = await self.colab.tunnel(account, session, self.store.get('settings', 'main')['identity'])
+                                    self.machine(account, port=port, telemetry_port=self.colab.telemetry_ports.get(account))
                         self.log(account, output)
                         last_check = time.monotonic()
                     await asyncio.sleep(3)
@@ -226,12 +236,13 @@ class Manager:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self.machine(account, phase="error", message=clean(str(exc)), last_activity=time.time())
-                self.log(account, f"启动失败：{exc}")
+                message = clean(str(exc)).strip() or type(exc).__name__
+                self.machine(account, phase="error", message=message[-1200:], last_activity=time.time())
+                self.log(account, f"启动失败：{type(exc).__name__}: {exc}")
                 # Preserve the owned session so the user can stop it even after partial failure.
                 for job in self.active_jobs(account):
                     if not job.get("prompt_id"):
-                        self.job(job["id"], status="failed", message="启动失败：" + clean(str(exc)))
+                        self.job(job["id"], status="failed", message="启动失败：" + message[-1200:])
 
     async def remote(self, account, method, path, payload=None, timeout=30):
         machine = self.machine(account)
@@ -240,6 +251,9 @@ class Manager:
         async with self.http.request(method, f"http://127.0.0.1:{machine['port']}{path}", json=payload,
                                      timeout=aiohttp.ClientTimeout(total=timeout)) as response:
             if response.status >= 400:
+                if response.status in {408, 429} or response.status >= 500:
+                    raise aiohttp.ClientResponseError(response.request_info, response.history,
+                                                      status=response.status, message=(await response.text())[:3500])
                 raise RuntimeError(f"ComfyUI {response.status}: " + (await response.text())[:3500])
             return await response.json()
 
@@ -455,6 +469,13 @@ class Manager:
                         asset = await register_result(self.store, destination, key, creative_node)
                         output.update(creative_node=creative_node, asset_id=asset["id"], media_type=asset["media_type"])
                     result.append(output)
+        by_node = {output.get('creative_node'):output.get('asset_id') for output in result}
+        for settings in creative.get('node_settings',{}).values():
+            for reference in settings.get('reference_inputs',[]):
+                if not reference.get('asset_id') and by_node.get(reference['node_id']):
+                    reference['asset_id'] = by_node[reference['node_id']]
+        if creative:
+            self.job(key,creative=creative)
         return result
 
     async def prepare_models(self, job=None, *, account=None, models=None):
@@ -467,6 +488,8 @@ class Manager:
         async def request(method):
             async with self.http.request(method, url, json={"models": models} if method == "POST" else None,
                                          timeout=aiohttp.ClientTimeout(total=15)) as response:
+                if 400 <= response.status < 500 and response.status not in {408,429}:
+                    raise ValueError(f'模型准备请求被拒绝（{response.status}）：' + (await response.text())[:500])
                 response.raise_for_status()
                 return await response.json()
         deadline = time.monotonic() + 3600

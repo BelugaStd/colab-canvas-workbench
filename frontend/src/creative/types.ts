@@ -2,12 +2,15 @@ import type { Edge, Node, Viewport } from '@xyflow/react'
 
 export type Kind = 'image' | 'video' | 'text' | 'upload' | 'upscale' | 'audio' | 'group'
 export type GenerationSettings = { prompt: string; model?: string; aspect?: string; resolution?: string;
-  quality?: string; duration?: number; fps?: number; audio?: boolean; mode?: string }
+  quality?: string; duration?: number; fps?: number; audio?: boolean; mode?: string; image_mode?: string; seed?: number;
+  reference_inputs?: {node_id:string;alias:string;role:string;label:string;asset_id?:string;text?:string}[];
+  resolved_prompt?:string; output_size?:[number,number] }
 export type NodeVersion = { id: string; asset_id: string; media_type: string; created_at: number;
   job_id?: string; settings?: GenerationSettings; note?: string }
 export type CardData = Record<string, unknown> & {
   kind: Kind; label: string; prompt: string; model?: string; aspect?: string; resolution?: string;
-  quality?: string; duration?: number; fps?: number; audio?: boolean; mode?: string;
+  quality?: string; duration?: number; fps?: number; audio?: boolean; mode?: string; image_mode?: string; seed?: number;
+  reference_sequence?: number; width?: number; height?: number;
   asset_id?: string; media_type?: string; job_id?: string; pinned?: boolean;
   versions?: NodeVersion[]; active_version_id?: string;
 }
@@ -31,13 +34,13 @@ export async function upload(file: File) {
   const response = await fetch('/api/assets', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Workbench-Token': csrf, 'X-Filename': encodeURIComponent(file.name) }, body: file })
   const data = await response.json()
   if (!response.ok) throw new Error(data.detail || '上传失败')
-  return data as { id: string; name: string; media_type: string }
+  return data as Asset
 }
 export function newNode(kind: Kind, position: { x: number; y: number }): CreativeNode {
   return { id: uid(), type: 'creative', position, data: { kind, label: names[kind], prompt: '',
     model: kind === 'image' ? 'minimax-image' : kind === 'video' ? 'minimax-h3' : kind === 'upscale' ? 'seedvr2-7b' : undefined,
-    aspect: kind === 'video' ? '16:9' : '1:1', resolution: kind === 'video' ? '768p' : kind === 'upscale' ? '2×' : '1K',
-    quality: '标准', duration: 5, fps: 24, audio: false, mode: '首尾帧' } }
+    aspect: 'source', resolution: kind === 'video' ? '768p' : kind === 'upscale' ? '2×' : '2K',
+    quality: '标准', duration: 5, fps: 24, audio: false, ...(kind==='video'?{mode:'文生视频'}:{}) } }
 }
 export function cleanCanvas(canvas: CanvasData): CanvasData {
   return { ...canvas, nodes: canvas.nodes.map(n => ({ id: n.id, type: 'creative', position: n.position, data: n.data,

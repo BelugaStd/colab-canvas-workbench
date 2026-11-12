@@ -29,6 +29,8 @@ IMAGE_REVISION = "0bb149f51e3156ed4b90dd45d5620346bfe1df8f"
 MOSS_REVISION = "2929efe3cdd506c0a430bcfca70a9a8d805cc095"
 MODEL_GROUPS = {
     "minimax-h3": [("Comfy-Org/MiniMax-H3", REVISION, file) for file in FILES],
+    "minimax-h3-reference": [("Comfy-Org/MiniMax-H3", REVISION, file) for file in
+                             ['diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors', *FILES[1:]]],
     "minimax-image": [
         ("Comfy-Org/MiniMax-H3-Image", IMAGE_REVISION, "diffusion_models/minimax_h3_image_pruned_int8_convrot.safetensors"),
         ("Comfy-Org/MiniMax-H3-Image", IMAGE_REVISION, "vae/minimax_h3_image_vae_fp16.safetensors"),

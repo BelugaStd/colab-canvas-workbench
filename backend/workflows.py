@@ -22,11 +22,11 @@ def validate_graph(graph):
             elif isinstance(value, float) and not math.isfinite(value):
                 raise ValueError(f"节点 {key}.{field} 必须是有限数值")
         inputs = node["inputs"]
-        if node["class_type"] == "MiniMaxH3ImageToVideo":
+        if node["class_type"] in {"MiniMaxH3ImageToVideo", "MiniMaxH3ReferenceToVideo"}:
             for field in ("width", "height"):
                 value = inputs.get(field)
-                if type(value) is not int or value < 256 or value > 2048 or value % 64:
-                    raise ValueError(f"{field} 必须是 256–2048 内的 64 的倍数")
+                if type(value) is not int or value < 256 or value > 2048 or value % 32:
+                    raise ValueError(f"{field} 必须是 256–2048 内的 32 的倍数")
             value = inputs.get("length")
             if type(value) is not int or not 4 <= value <= 512 or (value % 4 and (value - 5) % 17):
                 raise ValueError("帧数必须符合 H3 的 17k+5 网格，或为旧版预设的 4 的倍数")

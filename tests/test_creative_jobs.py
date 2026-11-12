@@ -32,6 +32,7 @@ async def test_canvas_reference_generation_returns_assets_and_keeps_node_mapping
             job = response.json()
             assert job['creative']['node_settings']['image']['prompt'] == '以@照片 为参考绘制森林'
             assert 'versions' not in job['creative']['node_settings']['image']
+            assert job['creative']['node_settings']['image']['reference_inputs']==[{'node_id':'ref','alias':'图1','role':'base','label':'照片','asset_id':asset['id']}]
             duplicate = await client.post(url, json={'account': 'colab2'})
             assert duplicate.status_code == 409
             for _ in range(150):
@@ -74,3 +75,28 @@ async def test_invalid_reference_is_rejected_before_gpu_allocation(tmp_path):
                                          json={'account': 'colab2'})
             assert response.status_code == 400
             assert not any(c[1] == 'create' for c in fake.calls)
+
+
+async def test_batch_records_the_exact_new_upstream_asset_in_downstream_version(tmp_path):
+    app=create_app(tmp_path,driver=FakeColab(delay=.01),account_profiles=PROFILES)
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=ASGITransport(app=app),base_url='http://testserver') as client:
+            client.headers['x-workbench-token']=(await client.get('/api/state')).json()['token']
+            project=(await client.post('/api/projects',json={})).json()
+            canvas=project['canvases'][0]
+            original=io.BytesIO()
+            Image.new('RGB',(64,64),'red').save(original,'PNG')
+            old_asset=(await client.post('/api/assets',content=original.getvalue())).json()['id']
+            canvas['nodes']=[{'id':key,'type':'creative','position':{'x':i*400,'y':0},'data':{'kind':kind,'label':key,'prompt':'A red cup'}} for i,(key,kind) in enumerate([('image','image'),('sr','upscale')])]
+            canvas['nodes'][0]['data'].update(asset_id=old_asset,media_type='image/png')
+            canvas['edges']=[{'id':'edge','source':'image','target':'sr'}]
+            await client.put('/api/projects/'+project['id'],json=project)
+            result=(await client.post(f"/api/projects/{project['id']}/canvases/{canvas['id']}/generate",json={'account':'colab2','nodes':['image','sr']})).json()
+            for _ in range(200):
+                result=(await client.get('/api/jobs/'+result['id'])).json()
+                if result['status'] in {'completed','failed'}:
+                    break
+                await asyncio.sleep(.05)
+            assert result['status']=='completed',result['message']
+            asset=next(output['asset_id'] for output in result['outputs'] if output['creative_node']=='image')
+            assert result['creative']['node_settings']['sr']['reference_inputs'][0]['asset_id']==asset

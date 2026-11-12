@@ -2,6 +2,16 @@ import sys
 from types import SimpleNamespace
 
 from backend import deploy_remote, video_sr_remote
+from backend.config import CREATIVE_MODELS
+from backend.telemetry_remote import ModelPreparation
+
+
+def test_every_canvas_model_is_accepted_by_remote_preparation(tmp_path,monkeypatch):
+    calls=[]
+    monkeypatch.setattr('backend.telemetry_remote.subprocess.Popen',lambda args,**kwargs:calls.append(args))
+    result=ModelPreparation(tmp_path).start('a'*32,CREATIVE_MODELS)
+    assert result['phase']=='starting'
+    assert set(calls[0][-1].split(','))==set(CREATIVE_MODELS)
 
 
 def test_model_preparation_is_repeatable_after_server_start(tmp_path, monkeypatch):

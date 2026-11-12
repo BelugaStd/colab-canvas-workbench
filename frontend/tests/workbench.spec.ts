@@ -1,5 +1,29 @@
 import { test, expect } from '@playwright/test'
 
+test('prompt caret stays in the middle across keystrokes, autosave and status polling', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: '新建项目', exact: true }).first().click()
+  await expect(page.locator('.cc-canvas')).toBeVisible()
+  await page.keyboard.press('i')
+  const input = page.getByLabel('描述这张图片', { exact: true })
+  await input.fill('A calm lake with a fox.')
+  await input.press('Home')
+  for (let i = 0; i < 7; i++) await input.press('ArrowRight')
+  await input.pressSequentially('beautiful ', { delay: 120 })
+  await expect(input).toHaveValue('A calm beautiful lake with a fox.')
+  await expect.poll(() => input.evaluate(el => el.selectionStart)).toBe(17)
+  await expect(page.locator('.cc-sidebar-save')).toHaveText('已保存')
+  await page.waitForResponse(response => response.url().endsWith('/api/state'))
+  await expect(input).toBeFocused()
+  expect(await input.evaluate(el => el.selectionStart)).toBe(17)
+  await input.pressSequentially('blue ')
+  await expect(input).toHaveValue('A calm beautiful blue lake with a fox.')
+  await expect(page.locator('.cc-sidebar-save')).toHaveText('已保存')
+  await page.reload()
+  await page.getByTestId('card-image').click()
+  await expect(input).toHaveValue('A calm beautiful blue lake with a fox.')
+})
+
 test('canvas prompts and model settings survive reload', async ({ page }) => {
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
@@ -12,7 +36,8 @@ test('canvas prompts and model settings survive reload', async ({ page }) => {
   await page.getByLabel('描述这张图片', { exact: true }).fill('A red fox beside a calm lake.')
   await page.getByRole('button', { name: '节点设置', exact: true }).click()
   await page.getByRole('button', { name: 'MOSS Image', exact: true }).click()
-  await page.getByRole('button', { name: '3:2', exact: true }).click()
+  await page.getByRole('combobox', { name: '画幅', exact: true }).click()
+  await page.getByRole('option', { name: '3:2', exact: true }).click()
   await page.getByRole('button', { name: '关闭设置', exact: true }).click()
   await expect(page.locator('.cc-sidebar-save')).toHaveText('已保存')
   await page.reload()
@@ -50,6 +75,7 @@ test('advanced panel opens resources and commands without allocating', async ({ 
   await page.goto('/')
   await page.getByRole('button', { name: '打开服务器高级面板', exact: true }).click()
   const panel = page.getByRole('dialog', { name: '服务器高级面板' })
+  await panel.getByRole('button', { name: /账号 3/ }).click()
   await expect(panel.getByRole('button', { name: '连接服务器', exact: true })).toBeVisible()
   await expect(panel.getByText('GPU 功率', { exact: true })).toBeVisible()
   await panel.getByRole('button', { name: '命令行', exact: true }).click()

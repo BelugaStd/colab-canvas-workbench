@@ -9,6 +9,7 @@ import { outputKind, upscaleInputIsVideo } from './upscale'
 import { Presence, Surface, transition } from './Motion'
 import '@xyflow/react/dist/style.css'
 import type { Job } from '../types'
+import { attachReference, normalizeReferences, referencesFor, setReferenceRole, videoMode } from './references'
 
 const nodeTypes = { creative: Card }
 const nodeKinds: Kind[] = ['text', 'image', 'video', 'upscale', 'upload']
@@ -35,6 +36,7 @@ function CanvasInner({ canvas, change, fail, generate, addRequest = 0, jobs = []
     if (remember) { history.current.past.push(structuredClone(current.current)); history.current.past = history.current.past.slice(-100); history.current.future = [] }
     current.current = next; change(next)
   }, [change])
+  useEffect(() => { const next = normalizeReferences(current.current); if (next !== current.current) commit(next, false) }, [canvas.id, commit])
   useEffect(()=>{
     if(!assetRequest||appliedAsset.current===assetRequest.requestId)return
     appliedAsset.current=assetRequest.requestId
@@ -64,7 +66,11 @@ function CanvasInner({ canvas, change, fail, generate, addRequest = 0, jobs = []
     commit({ ...current.current, nodes: [...current.current.nodes.map(n => ({ ...n, selected: false })), node] })
   }
   function update(id: string, values: Partial<CardData>) {
-    commit({ ...current.current, nodes: current.current.nodes.map(n => n.id === id ? { ...n, data: { ...n.data, ...values } } : n) })
+    const refs = referencesFor(id, current.current).filter(r=>r.node.data.kind!=='text')
+    const node = current.current.nodes.find(n=>n.id===id)
+    const modeChanged = values.mode && node && values.mode !== videoMode(node.data, refs.length)
+    commit({ ...current.current, nodes: current.current.nodes.map(n => n.id === id ? { ...n, data: { ...n.data, ...values } } : n),
+      edges: modeChanged ? current.current.edges.map(e=>e.target===id&&refs.some(r=>r.edge.id===e.id)?{...e,data:{...e.data,role:values.mode==='参考图'?'reference':refs.findIndex(r=>r.edge.id===e.id)===0?'first':'last'}}:e):current.current.edges })
   }
   function copy(ids = current.current.nodes.filter(n => n.selected).map(n => n.id)) {
     ids=[...ids,...current.current.nodes.filter(n=>n.parentId&&ids.includes(n.parentId)).map(n=>n.id)]
@@ -112,7 +118,12 @@ function CanvasInner({ canvas, change, fail, generate, addRequest = 0, jobs = []
     }
     if (reaches(c.target)) return fail('不能创建循环参考')
     if (current.current.edges.some(e => e.source === c.source && e.target === c.target)) return
-    commit({ ...current.current, edges: [...current.current.edges, { ...c, id: uid(), data: { role: 'reference' } }] })
+    const next = attachReference(current.current, {...c,id:uid()}, source, target)
+    const count = referencesFor(target.id, next).filter(r=>r.node.data.kind!=='text').length
+    if (target.data.kind === 'video' && count > (target.data.mode==='参考图'?9:2)) return fail('首尾帧最多两张图片；使用多张主体参考请先选择参考图模式')
+    if (target.data.kind === 'video' && target.data.mode==='首尾循环' && count>1) return fail('首尾循环使用一张相同的首尾图片')
+    if (target.data.kind === 'image' && count > (target.data.model==='moss-image'?4:10)) return fail('已达到此模型的参考图片上限')
+    commit(next)
   }
   async function uploadFiles(files: FileList | File[], point = center()) {
     setUploading(true)
@@ -122,11 +133,12 @@ function CanvasInner({ canvas, change, fail, generate, addRequest = 0, jobs = []
         const asset = await upload(source)
         if (uploadTarget.current && i === 0) {
           const target = current.current.nodes.find(n => n.id === uploadTarget.current)
-          if (target?.data.kind === 'upload') update(target.id, { asset_id: asset.id, media_type: asset.media_type, label: asset.name.slice(0,100) })
+          if (target?.data.kind === 'upload') update(target.id, { asset_id: asset.id, media_type: asset.media_type, width:asset.width, height:asset.height, label: asset.name.slice(0,100) })
           else {
             const node = newNode('upload', { x: (target?.position.x ?? point.x) - 380, y: target?.position.y ?? point.y })
             Object.assign(node.data, { asset_id: asset.id, media_type: asset.media_type, label: asset.name.slice(0,100) })
-            commit({ ...current.current, nodes: [...current.current.nodes, node], edges: [...current.current.edges, { id: uid(), source: node.id, target: uploadTarget.current, sourceHandle: 'output', targetHandle: 'input' }] })
+            commit({ ...current.current, nodes: [...current.current.nodes, node] })
+            connect({source:node.id,target:uploadTarget.current,sourceHandle:'output',targetHandle:'input'})
           }
         } else {
           const node = newNode('upload', { x: point.x + i * 320, y: point.y }); Object.assign(node.data, { asset_id: asset.id, media_type: asset.media_type, label: asset.name.slice(0,100) }); created.push(node)
@@ -154,10 +166,11 @@ function CanvasInner({ canvas, change, fail, generate, addRequest = 0, jobs = []
   function onDrop(e: DragEvent) { e.preventDefault(); uploadTarget.current = null; uploadFiles(e.dataTransfer.files, flow.screenToFlowPosition({ x:e.clientX, y:e.clientY })) }
   const shown = current.current.nodes.find(n => n.id === preview?.id)
   return <Surface className="cc-canvas" ref={wrapper} onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy' }} onDrop={onDrop}>
-    <CardContext.Provider value={{ previewOpen:!!preview, videoUpscale:id=>upscaleInputIsVideo(id,canvas.nodes,canvas.edges), update, references: id => canvas.edges.filter(e => e.target === id).map(e => canvas.nodes.find(n => n.id === e.source)!).filter(Boolean), generate, upload: id => { uploadTarget.current = id; file.current?.click() }, preview: (id,versionId)=>setPreview({id,versionId}),
+    <CardContext.Provider value={{ previewOpen:!!preview, videoUpscale:id=>upscaleInputIsVideo(id,canvas.nodes,canvas.edges), update, references: id => referencesFor(id,canvas), generate, upload: id => { uploadTarget.current = id; file.current?.click() }, preview: (id,versionId)=>setPreview({id,versionId}),
       job:id=>jobs.filter(j=>Object.values(j.creative?.output_nodes??{}).includes(id)).sort((a,b)=>b.created_at-a.created_at)[0], jobAction,
       referenceRole:(id,source)=>String(canvas.edges.find(e=>e.target===id&&e.source===source)?.data?.role??'reference'),
-      setReferenceRole:(id,source,role)=>commit({...current.current,edges:current.current.edges.map(e=>e.target===id&&e.source===source?{...e,data:{...e.data,role}}:e)}) }}>
+      removeReference:(id,source)=>commit({...current.current,edges:current.current.edges.filter(e=>!(e.target===id&&e.source===source))}),
+      setReferenceRole:(id,source,role)=>commit(setReferenceRole(current.current,id,source,role)) }}>
       <ReactFlow<CreativeNode> nodes={canvas.nodes.map(n => ({ ...n, draggable: true }))} edges={canvas.edges} nodeTypes={nodeTypes} defaultViewport={canvas.viewport} minZoom={.15} maxZoom={2.5} deleteKeyCode={null} nodeDragThreshold={5}
         onNodesChange={changes => commit({ ...current.current, nodes: applyNodeChanges(changes, current.current.nodes) }, false)}
         onEdgesChange={changes => commit({ ...current.current, edges: applyEdgeChanges(changes, current.current.edges) }, changes.some(c => c.type === 'remove'))}
@@ -180,7 +193,7 @@ function CanvasInner({ canvas, change, fail, generate, addRequest = 0, jobs = []
     <Presence>{menu && <Surface className="cc-popover cc-context" style={{left:menu.x,top:menu.y}}>{menu.node ? <><button onClick={() => { copy([menu.node!]); paste() }}><Copy size={16} />副本<kbd>Ctrl D</kbd></button><button onClick={() => copy([menu.node!])}><Copy size={16} />复制<kbd>Ctrl C</kbd></button><hr /><button className="danger" onClick={() => remove([menu.node!])}><Trash2 size={16} />删除<kbd>Del</kbd></button></> : <><button onClick={() => add('upload',menu.point)}><Upload size={16} />上传<kbd>U</kbd></button><button onClick={() => {setAdding({...menu});setMenu(null)}}><Plus size={16} />添加节点</button><hr /><button onClick={() => {undo();setMenu(null)}}><Undo2 size={16} />撤销<kbd>Ctrl Z</kbd></button><button onClick={() => {undo(true);setMenu(null)}}><Redo2 size={16} />重做<kbd>Ctrl Shift Z</kbd></button><hr /><button onClick={() => paste()}><Copy size={16} />粘贴<kbd>Ctrl V</kbd></button></>}</Surface>}</Presence>
     <Presence>{search !== null && <Surface className="cc-popover cc-search"><label><Search size={17} /><input autoFocus aria-label="搜索节点" placeholder="搜索画布中的节点" value={search} onChange={e=>setSearch(e.target.value)} /><button title="关闭搜索" onClick={()=>setSearch(null)}><X size={16}/></button></label>{canvas.nodes.filter(n=>n.data.label.includes(search)||n.data.prompt.includes(search)).map(n=><button key={n.id} onClick={()=>{flow.setCenter(n.position.x+140,n.position.y+140,{zoom:1,duration:250});commit({...current.current,nodes:current.current.nodes.map(x=>({...x,selected:x.id===n.id}))},false);setSearch(null)}}><ListFilter size={15}/>{n.data.label}</button>)}</Surface>}</Presence>
     <Presence>{uploading && <Surface className="cc-uploading" role="status">正在保存素材…</Surface>}</Presence>
-    <Presence>{shown?.data.asset_id && <NodeDetails key={shown.id} node={shown} videoUpscale={upscaleInputIsVideo(shown.id,canvas.nodes,canvas.edges)} initialVersion={preview?.versionId} update={values=>update(shown.id,values)} generate={()=>generate(shown.id)} close={()=>setPreview(null)} job={jobs.filter(j=>Object.values(j.creative?.output_nodes??{}).includes(shown.id)).sort((a,b)=>b.created_at-a.created_at)[0]}/>}</Presence>
+    <Presence>{shown?.data.asset_id && <NodeDetails key={shown.id} node={shown} references={referencesFor(shown.id,canvas)} setRole={(source,role)=>commit(setReferenceRole(current.current,shown.id,source,role))} removeReference={source=>commit({...current.current,edges:current.current.edges.filter(e=>!(e.target===shown.id&&e.source===source))})} videoUpscale={upscaleInputIsVideo(shown.id,canvas.nodes,canvas.edges)} initialVersion={preview?.versionId} update={values=>update(shown.id,values)} generate={()=>generate(shown.id)} close={()=>setPreview(null)} job={jobs.filter(j=>Object.values(j.creative?.output_nodes??{}).includes(shown.id)).sort((a,b)=>b.created_at-a.created_at)[0]}/>}</Presence>
     <input ref={file} hidden type="file" multiple accept="image/png,image/jpeg,image/webp,video/mp4,video/webm,audio/mpeg,audio/wav" onChange={e=>{if(e.target.files)uploadFiles(e.target.files);e.target.value=''}}/>
   </Surface>
 }

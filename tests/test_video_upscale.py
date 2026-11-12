@@ -32,9 +32,9 @@ def test_uploaded_video_compiles_to_video_upscaler_and_video_output(model):
 
 
 def test_new_h3_to_video_upscale_preserves_export_settings_and_shared_dependency():
-    canvas = {'nodes': [node('movie', 'video', duration=10, fps=30, mode='首尾循环', audio=True),
+    canvas = {'nodes': [node('first', 'image'), node('movie', 'video', duration=10, fps=30, mode='首尾循环', audio=True),
                         node('sr', 'upscale', resolution='4×')],
-              'edges': [{'source': 'movie', 'target': 'sr'}]}
+              'edges': [{'source': 'first', 'target': 'movie'}, {'source': 'movie', 'target': 'sr'}]}
     compiled = compile_canvas(canvas, ['sr', 'movie'])
     assert compiled['asset_ids'] == []
     assert compiled['postprocess_nodes']['sr'] == {'fps': 30, 'duration': 10, 'loop': True}

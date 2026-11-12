@@ -76,8 +76,19 @@ class Colab:
             raise RuntimeError(output or f"Colab CLI exited {process.returncode}")
         return output
 
+    async def read_command(self, account, operation):
+        for attempt in range(3):
+            try:
+                return await self.command(account, operation)
+            except (RuntimeError, TimeoutError) as exc:
+                transient = isinstance(exc, TimeoutError) or any(word in str(exc) for word in
+                    ('SSLError', 'ConnectionError', 'Connection was lost', 'Timeout', 'timed out', 'HTTP 429', 'HTTP 502', 'HTTP 503', 'HTTP 504'))
+                if not transient or attempt == 2:
+                    raise
+                await asyncio.sleep(2**attempt)
+
     async def sessions(self, account):
-        output = await self.command(account, "sessions")
+        output = await self.read_command(account, "sessions")
         if "No active sessions found on server" in output:
             return []
         rows = []
@@ -90,7 +101,7 @@ class Colab:
         return rows
 
     async def usage(self, account):
-        text = await self.command(account, "usage")
+        text = await self.read_command(account, "usage")
         def number(pattern):
             match = re.search(pattern, text)
             return float(match[1].replace(",", "")) if match else None

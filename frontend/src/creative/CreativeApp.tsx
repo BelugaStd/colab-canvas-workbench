@@ -47,6 +47,10 @@ export default function CreativeApp() {
       }catch(e){setSaveStatus('保存失败');setError((e as Error).message);throw e}
     });saveChain.current=operation;await operation
   },[])
+  async function flushCurrent() {
+    const id=current.current?.id
+    while(current.current?.id===id && current.current && saved.current[id!]!==contentKey(current.current)) await persist(current.current)
+  }
   useEffect(()=>{let alive=true;Promise.all([refresh(),fetchItems()]).then(async()=>{
     const id=location.hash.match(/^#project=([\w-]+)/)?.[1]
     if(id&&alive){const p=await api<Project>('/projects/'+id);revisions.current[p.id]=p.revision;saved.current[p.id]=contentKey(p);setProject(p);setCanvasId(p.canvases[0]?.id??'')}
@@ -62,15 +66,14 @@ export default function CreativeApp() {
   async function action(fn:()=>Promise<void>){setBusy(true);setError('');try{await fn()}catch(e){setError((e as Error).message)}finally{setBusy(false)}}
   async function open(item:ProjectSummary){await action(async()=>{
     if(item.kind==='folder'){setFolderId(item.id);return}
-    if(current.current)await persist(current.current)
-    const p=await api<Project>('/projects/'+item.id);revisions.current[p.id]=p.revision;saved.current[p.id]=contentKey(p);setProject(p);setCanvasId(p.canvases[0]?.id??'');setSaveStatus('已保存');location.hash='project='+p.id
+    const p=await api<Project>('/projects/'+item.id);await flushCurrent();revisions.current[p.id]=p.revision;saved.current[p.id]=contentKey(p);setProject(p);setCanvasId(p.canvases[0]?.id??'');setSaveStatus('已保存');location.hash='project='+p.id
   })}
   async function create(kind:'project'|'folder',name='Untitled'){await action(async()=>{
-    if(current.current)await persist(current.current)
+    await flushCurrent()
     const p=await api<Project>('/projects','POST',{kind,name,folder_id:folderId});await fetchItems()
-    if(kind==='project'){revisions.current[p.id]=p.revision;saved.current[p.id]=contentKey(p);setProject(p);setCanvasId(p.canvases[0].id);location.hash='project='+p.id}
+    if(kind==='project'){await flushCurrent();revisions.current[p.id]=p.revision;saved.current[p.id]=contentKey(p);setProject(p);setCanvasId(p.canvases[0].id);location.hash='project='+p.id}
   })}
-  async function back(){await action(async()=>{if(current.current)await persist(current.current);setProject(null);setMenu(null);location.hash='';await fetchItems()})}
+  async function back(){await action(async()=>{await flushCurrent();await fetchItems();await flushCurrent();setProject(null);setMenu(null);location.hash=''})}
   function rename(item:ProjectSummary|Project){setMenu(null);setDialog({title:item.kind==='folder'?'重命名文件夹':'重命名项目',value:item.name,submit:async name=>{
     if(current.current?.id===item.id){setProject(p=>p?{...p,name}:p)}else{await api('/projects/'+item.id,'PATCH',{name});await fetchItems()}
   }})}
@@ -80,7 +83,7 @@ export default function CreativeApp() {
   const shown=items.filter(p=>trash?!!p.deleted_at:!inheritedTrash(p)&&(query||p.folder_id===folderId)).filter(p=>p.name.toLowerCase().includes(query.toLowerCase())).filter(p=>filter==='全部'||(filter==='项目'?p.kind==='project':p.kind==='folder'))
   const canvas=project?.canvases.find(c=>c.id===canvasId)??project?.canvases[0]
   const profile=state?.accounts.find(a=>a.id===account), machine=profile?.machine
-  async function generate(id:string|string[]){if(!current.current||!canvas)return;await action(async()=>{await persist(current.current!);await api(Array.isArray(id)?`/projects/${current.current!.id}/canvases/${canvas.id}/generate`:`/projects/${current.current!.id}/canvases/${canvas.id}/nodes/${id}/generate`,'POST',{account,stop_after:false,...(Array.isArray(id)?{nodes:id}:{})});await refresh();setNotice('任务已加入队列，环境会自动准备')})}
+  async function generate(id:string|string[]){if(!current.current||!canvas)return;const source=current.current,sourceCanvas=canvas.id,sourceAccount=account;await action(async()=>{await persist(source);await api(Array.isArray(id)?`/projects/${source.id}/canvases/${sourceCanvas}/generate`:`/projects/${source.id}/canvases/${sourceCanvas}/nodes/${id}/generate`,'POST',{account:sourceAccount,stop_after:false,...(Array.isArray(id)?{nodes:id}:{})});await refresh();setNotice('任务已加入队列，环境会自动准备')})}
   function newCanvas(){if(!project)return;const c:CanvasData={id:uid(),name:'Untitled',nodes:[],edges:[],viewport:{x:0,y:0,zoom:.7142857}};setProject({...project,canvases:[...project.canvases,c]});setCanvasId(c.id)}
   function renameCanvas(c:CanvasData){setCanvasMenu(null);setDialog({title:'重命名画布',value:c.name,submit:async name=>{setProject(p=>p?{...p,canvases:p.canvases.map(x=>x.id===c.id?{...x,name}:x)}:p)}})}
   return <MotionConfig reducedMotion="user"><div className={`creative-app ${project?'cc-project-open':''}`} onClick={()=>menu&&setMenu(null)}>

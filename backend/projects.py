@@ -186,7 +186,7 @@ async def generate_batch(key: str, canvas_id: str, body: GenerateBatch, request:
 
 
 def submit_canvas(key, canvas_id, node_ids, body, request):
-    from .assets import asset_path
+    from .assets import asset_path, image_info
     from .creative_workflows import compile_canvas
     from .manager import ACTIVE
 
@@ -203,7 +203,14 @@ def submit_canvas(key, canvas_id, node_ids, body, request):
         run = job.get("creative", {})
         if job["status"] in ACTIVE and run.get("project_id") == key and run.get("canvas_id") == canvas_id and set(node_ids).intersection(run.get("output_nodes", {}).values()):
             raise HTTPException(409, "这个节点已有生成任务，请等待完成或先取消")
-    compiled = compile_canvas(canvas, node_ids)
+    asset_info = {asset['id']:asset for asset in store(request).all('assets')}
+    for asset_id in {n['data'].get('asset_id') for n in canvas['nodes']}:
+        asset = asset_info.get(asset_id,{})
+        if asset.get('media_type')=='image/jpeg' and 'orientation' not in asset:
+            path,_ = asset_path(store(request),asset_id)
+            asset_info[asset_id] = {**asset,**image_info(path)}
+            store(request).put('assets',asset_id,asset_info[asset_id])
+    compiled = compile_canvas(canvas, node_ids, asset_info=asset_info)
     for job in store(request).all("jobs"):
         run = job.get("creative", {})
         if job["status"] in ACTIVE and run.get("project_id") == key and run.get("canvas_id") == canvas_id and set(compiled["output_nodes"].values()).intersection(run.get("output_nodes", {}).values()):
@@ -220,11 +227,29 @@ def submit_canvas(key, canvas_id, node_ids, body, request):
     target = next(n for n in canvas["nodes"] if n["id"] == node_ids[0])
     metadata = {k: v for k, v in compiled.items() if k != "graph"}
     metadata.update(project_id=key, canvas_id=canvas_id)
-    settings_keys = {"prompt", "model", "aspect", "resolution", "quality", "duration", "fps", "audio", "mode"}
+    settings_keys = {"prompt", "model", "aspect", "resolution", "quality", "duration", "fps", "audio", "mode", "image_mode", "seed"}
     metadata["node_settings"] = {n["id"]: copy.deepcopy({k: v for k, v in n["data"].items() if k in settings_keys})
                                  for n in canvas["nodes"] if n["id"] in compiled["output_nodes"].values()}
     for node_id, model in compiled['node_models'].items():
         metadata['node_settings'][node_id]['model'] = model
+    for node_id, seed in compiled['node_seeds'].items():
+        metadata['node_settings'][node_id]['seed'] = seed
+        if node_id in compiled['reference_plans']:
+            mode = compiled['reference_plans'][node_id]['mode']
+            field = 'mode' if next(n['data']['kind'] for n in canvas['nodes'] if n['id'] == node_id) == 'video' else 'image_mode'
+            if mode:
+                metadata['node_settings'][node_id][field] = mode
+    nodes = {node['id']:node['data'] for node in canvas['nodes']}
+    generated = set(compiled['output_nodes'].values())
+    for node_id,plan in compiled['reference_plans'].items():
+        metadata['node_settings'][node_id]['reference_inputs'] = [
+            {'node_id':source,'alias':plan['aliases'][source],'role':plan['roles'][source],
+             'label':nodes[source]['label'],**({'asset_id':nodes[source]['asset_id']} if nodes[source].get('asset_id') and source not in generated else {}),
+             **({'text':nodes[source].get('prompt','')} if nodes[source]['kind']=='text' else {})}
+            for source in plan['images']+plan['texts']]
+        metadata['node_settings'][node_id]['resolved_prompt'] = plan['resolved_prompt']
+        if node_id in compiled['node_dimensions']:
+            metadata['node_settings'][node_id]['output_size'] = compiled['node_dimensions'][node_id]
     name = target["data"]["label"] if len(node_ids) == 1 else f"批量生成 · {len(node_ids)} 个节点"
     return manager.submit(body.account, compiled["graph"], name, body.stop_after, creative=metadata)
 
