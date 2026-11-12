@@ -96,6 +96,7 @@ def test_output_dimensions_preserve_aspect_and_cap_long_edge_and_pixel_budget():
 
 
 @pytest.mark.parametrize('model', PRESETS)
+@pytest.mark.skipif(not shutil.which('ffprobe'), reason='ffprobe required')
 async def test_video_upload_to_completed_local_asset_and_version_settings(tmp_path, model):
     import asyncio
 
@@ -110,7 +111,9 @@ async def test_video_upload_to_completed_local_asset_and_version_settings(tmp_pa
     async with app.router.lifespan_context(app):
         async with AsyncClient(transport=ASGITransport(app=app), base_url='http://testserver') as client:
             client.headers['x-workbench-token'] = (await client.get('/api/state')).json()['token']
-            asset = (await client.post('/api/assets', content=(ROOT / 'tests/fixtures/synthetic.mp4').read_bytes())).json()
+            uploaded = await client.post('/api/assets', content=(ROOT / 'tests/fixtures/synthetic.mp4').read_bytes())
+            assert uploaded.status_code == 201, uploaded.text
+            asset = uploaded.json()
             project = (await client.post('/api/projects', json={})).json()
             canvas = project['canvases'][0]
             canvas['nodes'] = [node('source', 'upload', asset_id=asset['id'], media_type='video/mp4'),
