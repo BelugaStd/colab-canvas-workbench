@@ -210,14 +210,21 @@ def submit_canvas(key, canvas_id, node_ids, body, request):
             raise HTTPException(409, "上游参考正在生成，请等待完成后再生成下游")
     for asset_id in compiled["asset_ids"]:
         _, asset = asset_path(store(request), asset_id)
-        if not asset["media_type"].startswith("image/"):
-            raise ValueError("请连接图片素材作为参考")
+        expected = compiled["asset_media_types"][asset_id]
+        if (not asset["media_type"].startswith(("image/", "video/"))
+                or asset["media_type"].split('/')[0] != expected.split('/')[0]
+                or (expected.startswith('video/') and asset["media_type"] != expected)):
+            raise ValueError("参考素材类型不匹配，请重新添加图片或视频")
+        if expected.startswith('video/') and not 0 < asset.get('duration', 0) <= 120:
+            raise ValueError("视频超分支持最长 120 秒的视频")
     target = next(n for n in canvas["nodes"] if n["id"] == node_ids[0])
     metadata = {k: v for k, v in compiled.items() if k != "graph"}
     metadata.update(project_id=key, canvas_id=canvas_id)
     settings_keys = {"prompt", "model", "aspect", "resolution", "quality", "duration", "fps", "audio", "mode"}
     metadata["node_settings"] = {n["id"]: copy.deepcopy({k: v for k, v in n["data"].items() if k in settings_keys})
                                  for n in canvas["nodes"] if n["id"] in compiled["output_nodes"].values()}
+    for node_id, model in compiled['node_models'].items():
+        metadata['node_settings'][node_id]['model'] = model
     name = target["data"]["label"] if len(node_ids) == 1 else f"批量生成 · {len(node_ids)} 个节点"
     return manager.submit(body.account, compiled["graph"], name, body.stop_after, creative=metadata)
 

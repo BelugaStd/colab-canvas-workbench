@@ -7,9 +7,9 @@ import { Presence, Surface } from './Motion'
 import VersionStrip from './VersionStrip'
 import CreationSettings from './CreationSettings'
 
-export default function NodeDetails({ node, initialVersion, update, generate, close, job }: {
+export default function NodeDetails({ node, initialVersion, update, generate, close, job, videoUpscale=false }: {
   node: CreativeNode; initialVersion?: string; update: (data: Partial<CardData>) => void;
-  generate: () => void; close: () => void; job?: Job;
+  generate: () => void; close: () => void; job?: Job; videoUpscale?: boolean;
 }) {
   const [viewed, setViewed] = useState(initialVersion ?? node.data.active_version_id ?? node.data.asset_id)
   const activeId = node.data.active_version_id ?? node.data.asset_id, previousActive = useRef(activeId)
@@ -42,7 +42,7 @@ export default function NodeDetails({ node, initialVersion, update, generate, cl
       {['image','video','upscale','text'].includes(node.data.kind) && <aside className="cc-detail-editor">
         <h3>调整并重新生成</h3><p>新结果保存在这个节点，已有版本会保留。</p>
         {node.data.kind !== 'upscale' && <textarea aria-label="详情提示词" value={node.data.prompt} onChange={e => update({prompt:e.target.value})} placeholder="描述你想要的画面…"/>}
-        <CreationSettings data={node.data} update={update}/>
+        <CreationSettings data={node.data} update={update} videoUpscale={videoUpscale}/>
         {version.settings && <button className="cc-restore-settings" onClick={() => update({...version.settings})}><RotateCcw size={14}/>使用此版本参数</button>}
         <button className="cc-white-button" disabled={running || (node.data.kind !== 'upscale' && !node.data.prompt.trim())} onClick={generate}><ArrowUp size={16}/>{running?'正在生成…':'重新生成'}</button>
       </aside>}</div>

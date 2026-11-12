@@ -130,6 +130,7 @@ class Manager:
                     self.log(account, f"额度刷新暂时失败，部署继续：{exc}")
                 deploy = (ROOT / "backend/deploy_remote.py").read_bytes()
                 telemetry = (ROOT / "backend/telemetry_remote.py").read_bytes()
+                video_sr = (ROOT / "backend/video_sr_remote.py").read_bytes()
                 queued = self.active_jobs(account)
                 initial_models = queued[0].get("creative", {}).get("models", ["minimax-h3"]) if queued else ["minimax-h3"]
                 if full:
@@ -140,6 +141,7 @@ class Manager:
                     f"root=Path({REMOTE_ROOT!r}); root.mkdir(parents=True,exist_ok=True)\n"
                     f"(root/'deploy_remote.py').write_bytes(base64.b64decode({base64.b64encode(deploy).decode()!r}))\n"
                     f"(root/'telemetry_remote.py').write_bytes(base64.b64decode({base64.b64encode(telemetry).decode()!r}))\n"
+                    f"(root/'video_sr_remote.py').write_bytes(base64.b64decode({base64.b64encode(video_sr).decode()!r}))\n"
                     "with (root/'telemetry.log').open('ab') as log:\n"
                     " subprocess.Popen([sys.executable,str(root/'telemetry_remote.py')],stdout=log,stderr=subprocess.STDOUT,start_new_session=True)\n"
                     "with (root/'deploy.log').open('ab') as log:\n"
@@ -376,6 +378,8 @@ class Manager:
         job = self.job(key)
         creative = job.get("creative", {})
         for node_id, node in outputs.items():
+            if creative and node_id not in creative.get('output_nodes', {}):
+                continue
             for kind in ("images", "videos", "audio", "gifs"):
                 for item in node.get(kind, []):
                     if not isinstance(item, dict) or not item.get("filename"):

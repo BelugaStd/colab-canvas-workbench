@@ -48,8 +48,9 @@ class ModelPreparation:
         return json.loads(path.read_text()) if path.exists() else {"phase": "missing"}
 
     def start(self, key, models):
-        allowed = {"minimax-h3", "minimax-image", "moss-image", "moss-edit", "upscale"}
-        if not isinstance(models, list) or not models or len(models) > 5 or any(type(m) is not str or m not in allowed for m in models):
+        allowed = {"minimax-h3", "minimax-image", "moss-image", "moss-edit", "upscale",
+                   "seedvr2-7b", "seedvr2-7b-sharp", "seedvr2-3b"}
+        if not isinstance(models, list) or not models or len(models) > len(allowed) or any(type(m) is not str or m not in allowed for m in models):
             raise ValueError("Invalid model preset")
         with self.lock:
             path = self.path(key)

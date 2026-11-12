@@ -107,6 +107,9 @@ class FakeColab:
                     return
                 outputs = {}
                 for node_id, node in body['prompt'].items():
+                    if node['class_type'] == 'LoadVideo':
+                        outputs[node_id] = {'images': [{'filename': node['inputs']['file'], 'type': 'input'}]}
+                        continue
                     if node['class_type'] not in {'SaveVideo', 'SaveImage', 'SaveAudio'}:
                         continue
                     filename = 'test.png' if node['class_type'] == 'SaveImage' else 'test.mp4'

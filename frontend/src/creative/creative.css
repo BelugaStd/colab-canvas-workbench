@@ -49,3 +49,5 @@
 .cc-empty-node{position:absolute;inset:0;min-height:0!important}.cc-editor-reveal{position:relative}.cc-card-caption{transition:opacity .18s}
 .creative-app{color-scheme:dark}.creative-app *{scrollbar-width:thin;scrollbar-color:#444 transparent}
 .cc-job-status{position:relative;z-index:1}
+
+.cc-upscale-model .cc-glass-select{width:100%;justify-content:space-between;padding:11px 12px;min-height:42px}.cc-upscale-model p,.cc-setting-hint{font-size:12px;color:#999;line-height:1.6;margin:9px 2px 12px}.cc-upscale .cc-model-label{font-size:11px;white-space:nowrap}

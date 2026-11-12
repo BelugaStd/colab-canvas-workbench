@@ -24,20 +24,25 @@ def reference_png(path):
 
 async def upload_references(manager, job):
     for key in job["creative"]["asset_ids"]:
-        path, _ = asset_path(manager.store, key)
-        content = await asyncio.to_thread(reference_png, path)
-        filename = f"creative-{key}.png"
+        path, asset = asset_path(manager.store, key)
+        video = asset["media_type"].startswith("video/")
+        content = path.open('rb') if video else await asyncio.to_thread(reference_png, path)
+        filename = f"creative-{key}" + (asset["extension"] if video else ".png")
         form = aiohttp.FormData()
-        form.add_field("image", content, filename=filename, content_type="image/png")
+        form.add_field("image", content, filename=filename, content_type=asset["media_type"] if video else "image/png")
         form.add_field("type", "input")
         form.add_field("overwrite", "true")
         port = manager.machine(job["account"])["port"]
-        async with manager.http.post(f"http://127.0.0.1:{port}/upload/image", data=form,
-                                     timeout=aiohttp.ClientTimeout(total=120)) as response:
-            response.raise_for_status()
-            uploaded = await response.json()
-            if uploaded.get("name") != filename or uploaded.get("subfolder", ""):
-                raise RuntimeError("参考素材上传后名称不匹配，已停止提交")
+        try:
+            async with manager.http.post(f"http://127.0.0.1:{port}/upload/image", data=form,
+                                         timeout=aiohttp.ClientTimeout(total=300)) as response:
+                response.raise_for_status()
+                uploaded = await response.json()
+                if uploaded.get("name") != filename or uploaded.get("subfolder", ""):
+                    raise RuntimeError("参考素材上传后名称不匹配，已停止提交")
+        finally:
+            if video:
+                content.close()
 
 
 async def command(*args):

@@ -118,7 +118,7 @@ def create_app(directory=DATA, driver=None, account_profiles=None):
                              **store().get("accounts", profile["id"], {})})
         jobs = sorted(store().all("jobs"), key=lambda j: j["created_at"], reverse=True)
         jobs = [{k: v for k, v in j.items() if k not in {"graph", "history"}} for j in jobs]
-        return {"token": token, "accounts": accounts, "jobs": jobs, "features": {"creative_canvas": True},
+        return {"token": token, "accounts": accounts, "jobs": jobs, "features": {"creative_canvas": True, "video_upscale": True},
                 "simulated": bool(getattr(manager().colab, "simulated", False)),
                 "settings": store().get("settings", "main"),
                 "drafts": [{k: v for k, v in d.items() if k not in {"graph", "positions"}} for d in store().all("drafts")],

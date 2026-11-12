@@ -196,7 +196,8 @@ async def test_connect_all_waits_for_full_model_preparation(rig, monkeypatch):
     monkeypatch.setattr(manager, 'prepare_models', prepare)
     await manager.start('colab2', full=True)
     assert manager.machine('colab2')['phase'] == 'ready'
-    assert set(seen[-1]) == {'minimax-h3', 'minimax-image', 'moss-image', 'moss-edit', 'upscale'}
+    assert set(seen[-1]) == {'minimax-h3', 'minimax-image', 'moss-image', 'moss-edit', 'upscale',
+                             'seedvr2-7b', 'seedvr2-7b-sharp', 'seedvr2-3b'}
 
 
 async def test_stale_usage_refresh_cannot_forget_a_newly_allocated_session(rig, monkeypatch):

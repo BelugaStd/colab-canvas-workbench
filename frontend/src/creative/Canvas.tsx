@@ -5,13 +5,14 @@ import { Copy, Hand, Image, ListFilter, Map, Maximize2, MousePointer2, Plus, Red
 import Card, { CardContext, kindIcons } from './Card'
 import { assetUrl, names, newNode, uid, upload, type Asset, type CanvasData, type CardData, type CreativeNode, type Kind } from './types'
 import NodeDetails from './NodeDetails'
+import { outputKind, upscaleInputIsVideo } from './upscale'
 import { Presence, Surface, transition } from './Motion'
 import '@xyflow/react/dist/style.css'
 import type { Job } from '../types'
 
 const nodeTypes = { creative: Card }
 const nodeKinds: Kind[] = ['text', 'image', 'video', 'upscale', 'upload']
-const descriptions: Partial<Record<Kind, string>> = { text: '脚本、广告词、品牌文案', image: '宣传图、海报、封面', video: '宣传视频、动画、电影', upscale: '提升画面清晰度', upload: '图片、视频、音频，放到画布上' }
+const descriptions: Partial<Record<Kind, string>> = { text: '脚本、广告词、品牌文案', image: '宣传图、海报、封面', video: '宣传视频、动画、电影', upscale: '图片、视频清晰度增强', upload: '图片、视频、音频，放到画布上' }
 const shortcuts: Partial<Record<Kind, string>> = { text: 'T', image: 'I', video: 'V', upload: 'U' }
 
 function CanvasInner({ canvas, change, fail, generate, addRequest = 0, jobs = [], jobAction, assetRequest }: { canvas: CanvasData; change: (c: CanvasData) => void; fail: (message: string) => void; generate: (id: string|string[]) => void; addRequest?: number; jobs?: Job[]; jobAction: (id:string, operation:'cancel'|'resume')=>void; assetRequest?: (Asset&{requestId:string})|null }) {
@@ -101,7 +102,9 @@ function CanvasInner({ canvas, change, fail, generate, addRequest = 0, jobs = []
     if (c.source === c.target) return fail('节点不能引用自身')
     const source = current.current.nodes.find(n => n.id === c.source), target = current.current.nodes.find(n => n.id === c.target)
     if (!source || !target || ['upload', 'text','group'].includes(target.data.kind)||source.data.kind==='group') return fail('请连接到图片、视频或超分节点的输入端')
-    if (source.data.kind === 'video' || source.data.kind === 'audio'||source.data.media_type?.startsWith('video/')||source.data.media_type?.startsWith('audio/')) return fail('当前模型使用图片或文本参考，请连接图片输出')
+    const kind = outputKind(source.id, current.current.nodes, current.current.edges)
+    if (kind === 'audio' || (kind === 'video' && target.data.kind !== 'upscale')) return fail('视频可连接超分节点；图片和视频生成使用图片或文本参考')
+    if (target.data.kind === 'upscale' && (kind === 'text' || current.current.edges.some(e=>e.target===target.id))) return fail('超分节点只需连接一张图片或一段视频')
     const visited = new Set<string>(), reaches = (id: string): boolean => {
       if (id === c.source) return true
       if (visited.has(id)) return false
@@ -151,7 +154,7 @@ function CanvasInner({ canvas, change, fail, generate, addRequest = 0, jobs = []
   function onDrop(e: DragEvent) { e.preventDefault(); uploadTarget.current = null; uploadFiles(e.dataTransfer.files, flow.screenToFlowPosition({ x:e.clientX, y:e.clientY })) }
   const shown = current.current.nodes.find(n => n.id === preview?.id)
   return <Surface className="cc-canvas" ref={wrapper} onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy' }} onDrop={onDrop}>
-    <CardContext.Provider value={{ previewOpen:!!preview, update, references: id => canvas.edges.filter(e => e.target === id).map(e => canvas.nodes.find(n => n.id === e.source)!).filter(Boolean), generate, upload: id => { uploadTarget.current = id; file.current?.click() }, preview: (id,versionId)=>setPreview({id,versionId}),
+    <CardContext.Provider value={{ previewOpen:!!preview, videoUpscale:id=>upscaleInputIsVideo(id,canvas.nodes,canvas.edges), update, references: id => canvas.edges.filter(e => e.target === id).map(e => canvas.nodes.find(n => n.id === e.source)!).filter(Boolean), generate, upload: id => { uploadTarget.current = id; file.current?.click() }, preview: (id,versionId)=>setPreview({id,versionId}),
       job:id=>jobs.filter(j=>Object.values(j.creative?.output_nodes??{}).includes(id)).sort((a,b)=>b.created_at-a.created_at)[0], jobAction,
       referenceRole:(id,source)=>String(canvas.edges.find(e=>e.target===id&&e.source===source)?.data?.role??'reference'),
       setReferenceRole:(id,source,role)=>commit({...current.current,edges:current.current.edges.map(e=>e.target===id&&e.source===source?{...e,data:{...e.data,role}}:e)}) }}>
@@ -177,7 +180,7 @@ function CanvasInner({ canvas, change, fail, generate, addRequest = 0, jobs = []
     <Presence>{menu && <Surface className="cc-popover cc-context" style={{left:menu.x,top:menu.y}}>{menu.node ? <><button onClick={() => { copy([menu.node!]); paste() }}><Copy size={16} />副本<kbd>Ctrl D</kbd></button><button onClick={() => copy([menu.node!])}><Copy size={16} />复制<kbd>Ctrl C</kbd></button><hr /><button className="danger" onClick={() => remove([menu.node!])}><Trash2 size={16} />删除<kbd>Del</kbd></button></> : <><button onClick={() => add('upload',menu.point)}><Upload size={16} />上传<kbd>U</kbd></button><button onClick={() => {setAdding({...menu});setMenu(null)}}><Plus size={16} />添加节点</button><hr /><button onClick={() => {undo();setMenu(null)}}><Undo2 size={16} />撤销<kbd>Ctrl Z</kbd></button><button onClick={() => {undo(true);setMenu(null)}}><Redo2 size={16} />重做<kbd>Ctrl Shift Z</kbd></button><hr /><button onClick={() => paste()}><Copy size={16} />粘贴<kbd>Ctrl V</kbd></button></>}</Surface>}</Presence>
     <Presence>{search !== null && <Surface className="cc-popover cc-search"><label><Search size={17} /><input autoFocus aria-label="搜索节点" placeholder="搜索画布中的节点" value={search} onChange={e=>setSearch(e.target.value)} /><button title="关闭搜索" onClick={()=>setSearch(null)}><X size={16}/></button></label>{canvas.nodes.filter(n=>n.data.label.includes(search)||n.data.prompt.includes(search)).map(n=><button key={n.id} onClick={()=>{flow.setCenter(n.position.x+140,n.position.y+140,{zoom:1,duration:250});commit({...current.current,nodes:current.current.nodes.map(x=>({...x,selected:x.id===n.id}))},false);setSearch(null)}}><ListFilter size={15}/>{n.data.label}</button>)}</Surface>}</Presence>
     <Presence>{uploading && <Surface className="cc-uploading" role="status">正在保存素材…</Surface>}</Presence>
-    <Presence>{shown?.data.asset_id && <NodeDetails key={shown.id} node={shown} initialVersion={preview?.versionId} update={values=>update(shown.id,values)} generate={()=>generate(shown.id)} close={()=>setPreview(null)} job={jobs.filter(j=>Object.values(j.creative?.output_nodes??{}).includes(shown.id)).sort((a,b)=>b.created_at-a.created_at)[0]}/>}</Presence>
+    <Presence>{shown?.data.asset_id && <NodeDetails key={shown.id} node={shown} videoUpscale={upscaleInputIsVideo(shown.id,canvas.nodes,canvas.edges)} initialVersion={preview?.versionId} update={values=>update(shown.id,values)} generate={()=>generate(shown.id)} close={()=>setPreview(null)} job={jobs.filter(j=>Object.values(j.creative?.output_nodes??{}).includes(shown.id)).sort((a,b)=>b.created_at-a.created_at)[0]}/>}</Presence>
     <input ref={file} hidden type="file" multiple accept="image/png,image/jpeg,image/webp,video/mp4,video/webm,audio/mpeg,audio/wav" onChange={e=>{if(e.target.files)uploadFiles(e.target.files);e.target.value=''}}/>
   </Surface>
 }

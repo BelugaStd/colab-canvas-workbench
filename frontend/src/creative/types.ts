@@ -35,8 +35,8 @@ export async function upload(file: File) {
 }
 export function newNode(kind: Kind, position: { x: number; y: number }): CreativeNode {
   return { id: uid(), type: 'creative', position, data: { kind, label: names[kind], prompt: '',
-    model: kind === 'image' ? 'minimax-image' : kind === 'video' ? 'minimax-h3' : 'realesrgan',
-    aspect: kind === 'video' ? '16:9' : '1:1', resolution: kind === 'video' ? '768p' : '1K',
+    model: kind === 'image' ? 'minimax-image' : kind === 'video' ? 'minimax-h3' : kind === 'upscale' ? 'seedvr2-7b' : undefined,
+    aspect: kind === 'video' ? '16:9' : '1:1', resolution: kind === 'video' ? '768p' : kind === 'upscale' ? '2×' : '1K',
     quality: '标准', duration: 5, fps: 24, audio: false, mode: '首尾帧' } }
 }
 export function cleanCanvas(canvas: CanvasData): CanvasData {

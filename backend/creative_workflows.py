@@ -4,6 +4,7 @@ import math
 import secrets
 
 from .config import ROOT
+from .video_sr_remote import MODEL_PRESETS
 
 ASPECTS = {"16:9": 16 / 9, "3:2": 1.5, "4:3": 4 / 3, "1:1": 1, "3:4": .75, "9:16": 9 / 16}
 
@@ -49,6 +50,8 @@ def compile_canvas(canvas, target_id):
     graph, outputs, assets, models, resolved, visiting = {}, {}, [], set(), {}, set()
     postprocess = {}
     postprocess_nodes = {}
+    asset_media_types, output_types = {}, {}
+    node_models = {}
 
     def add(class_type, **inputs):
         key = f"c{len(graph) + 1}"
@@ -78,18 +81,27 @@ def compile_canvas(canvas, target_id):
             return None
         visiting.add(key)
         if data.get("asset_id") and not force:
-            if data.get("media_type", "image/png").split("/")[0] != "image":
-                raise ValueError("当前生成模型使用图片参考，请连接图片素材")
+            media_type = data.get("media_type", "image/png")
+            if not media_type.startswith(("image/", "video/")):
+                raise ValueError("请连接图片或视频素材")
             asset_id = data["asset_id"]
             if asset_id not in assets:
                 assets.append(asset_id)
-            result = add("LoadImage", image=f"creative-{asset_id}.png")
+            asset_media_types[asset_id] = media_type
+            if media_type.startswith("video/"):
+                extension = "webm" if media_type == "video/webm" else "mp4"
+                result = add("LoadVideo", file=f"creative-{asset_id}.{extension}")
+                output_types[key] = "video"
+            else:
+                result = add("LoadImage", image=f"creative-{asset_id}.png")
+                output_types[key] = "image"
         elif kind == "upload":
             raise ValueError(f"请先给「{data['label']}」上传素材")
         elif kind in {"image", "video", "upscale"}:
-            if any(nodes[source]["kind"] in {"video", "audio"} for source in incoming[key]):
-                raise ValueError("当前生成模型使用图片参考，请连接图片输出")
-            references = [build(source, force=source in targets) for source in incoming[key] if nodes[source]["kind"] != "text"]
+            reference_ids = [source for source in incoming[key] if nodes[source]["kind"] != "text"]
+            references = [build(source, force=source in targets) for source in reference_ids]
+            if kind != "upscale" and any(output_types[source] != "image" for source in reference_ids):
+                raise ValueError("当前生成模型使用图片参考，请连接图片输出；视频可连接超分节点")
             prompt = prompt_for(key)
             seed = data.get("seed", secrets.randbits(32))
             if type(seed) is not int or not 0 <= seed < 2**53:
@@ -189,16 +201,31 @@ def compile_canvas(canvas, target_id):
                     postprocess.update(fps=fps, duration=duration, loop=mode == "首尾循环")
             else:
                 if len(references) != 1:
-                    raise ValueError("超分节点需要连接一张图片")
-                models.add("upscale")
+                    raise ValueError("超分节点需要连接一张图片或一段视频")
                 scale = data.get("resolution", "2×")
                 if scale not in {"2×", "4×"}:
                     raise ValueError("超分倍数可选 2× / 4×")
-                upscaler = add("UpscaleModelLoader", model_name="RealESRGAN_x4plus.pth")
-                result = add("ImageUpscaleWithModel", upscale_model=upscaler, image=references[0])
-                if scale == "2×":
-                    result = add("ImageScaleBy", image=result, upscale_method="lanczos", scale_by=.5)
-                saved = add("SaveImage", images=result, filename_prefix="creative-upscale")
+                if output_types[reference_ids[0]] == "video":
+                    model = data.get("model", "seedvr2-7b")
+                    if model == "realesrgan":
+                        model = "seedvr2-7b"
+                    if model not in MODEL_PRESETS:
+                        raise ValueError("请选择支持的视频超分模型")
+                    models.add(model)
+                    node_models[key] = model
+                    result = add("WorkbenchVideoUpscale", video=references[0], model=model, scale=int(scale[0]))
+                    saved = add("SaveVideo", video=result, filename_prefix="video/creative-upscale", format="mp4", codec="h264")
+                    if reference_ids[0] in postprocess_nodes:
+                        postprocess_nodes[key] = dict(postprocess_nodes[reference_ids[0]])
+                else:
+                    models.add("upscale")
+                    node_models[key] = "realesrgan"
+                    upscaler = add("UpscaleModelLoader", model_name="RealESRGAN_x4plus.pth")
+                    result = add("ImageUpscaleWithModel", upscale_model=upscaler, image=references[0])
+                    if scale == "2×":
+                        result = add("ImageScaleBy", image=result, upscale_method="lanczos", scale_by=.5)
+                    saved = add("SaveImage", images=result, filename_prefix="creative-upscale")
+            output_types[key] = "video" if kind == "video" or (kind == "upscale" and output_types[reference_ids[0]] == "video") else "image"
             outputs[saved[0]] = key
         else:
             raise ValueError("这个节点不支持直接生成")
@@ -208,5 +235,6 @@ def compile_canvas(canvas, target_id):
 
     for target in targets:
         build(target, force=True)
-    return {"graph": graph, "asset_ids": assets, "models": sorted(models), "output_nodes": outputs,
+    return {"graph": graph, "asset_ids": assets, "asset_media_types": asset_media_types, "models": sorted(models),
+            "node_models": node_models, "output_nodes": outputs,
             "postprocess": postprocess, "postprocess_nodes": postprocess_nodes, "target_node": targets[0], "target_nodes": targets}
