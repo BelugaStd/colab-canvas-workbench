@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+if [ -x .venv/Scripts/python.exe ]; then
+  exec .venv/Scripts/python.exe scripts/check_publish.py
+fi
+if [ -x .venv/bin/python ]; then
+  exec .venv/bin/python scripts/check_publish.py
+fi
+exec python3 scripts/check_publish.py

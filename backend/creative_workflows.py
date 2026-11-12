@@ -1,0 +1,212 @@
+"""Compile creative cards to pinned native ComfyUI graphs. No user-supplied class names."""
+import json
+import math
+import secrets
+
+from .config import ROOT
+
+ASPECTS = {"16:9": 16 / 9, "3:2": 1.5, "4:3": 4 / 3, "1:1": 1, "3:4": .75, "9:16": 9 / 16}
+
+
+def dimensions(data, video=False):
+    aspect = data.get("aspect", "16:9" if video else "1:1")
+    if aspect not in ASPECTS:
+        raise ValueError("请选择支持的画幅")
+    ratio = ASPECTS[aspect]
+    resolution = data.get("resolution", "768p" if video else "1K")
+    if video:
+        if resolution not in {"512p", "768p"}:
+            raise ValueError("H3 视频仅提供推荐范围内的 512p / 768p")
+        short = 512 if resolution == "512p" else 768
+        width, height = (short * ratio, short) if ratio >= 1 else (short, short / ratio)
+        scale = min(1, math.sqrt(768 * 1344 / (width * height)))
+        width, height = width * scale, height * scale
+        return max(256, int(width / 64) * 64), max(256, int(height / 64) * 64)
+    if resolution not in {"1K", "2K"}:
+        raise ValueError("图片分辨率须为 1K 或 2K")
+    area = 1024**2 if resolution == "1K" else 2048**2
+    return round(math.sqrt(area * ratio) / 16) * 16, round(math.sqrt(area / ratio) / 16) * 16
+
+
+def compile_canvas(canvas, target_id):
+    targets = [target_id] if isinstance(target_id, str) else list(dict.fromkeys(target_id))
+    nodes = {n["id"]: n["data"] for n in canvas["nodes"]}
+    if not targets or any(target not in nodes for target in targets):
+        raise ValueError("节点不存在")
+    incoming = {key: [] for key in nodes}
+    roles = {}
+    for edge in canvas["edges"]:
+        if edge["source"] not in nodes or edge["target"] not in nodes:
+            raise ValueError("连线引用了不存在的节点")
+        incoming[edge["target"]].append(edge["source"])
+        role = edge.get("data", {}).get("role", "reference")
+        if role not in {"first", "last", "reference"}:
+            raise ValueError("未知的参考用途")
+        roles[(edge["target"], edge["source"])] = role
+    for target, sources in incoming.items():
+        if nodes[target]["kind"] == "video":
+            sources.sort(key=lambda source: {"first": 0, "reference": 1, "last": 2}[roles[(target, source)]])
+    graph, outputs, assets, models, resolved, visiting = {}, {}, [], set(), {}, set()
+    postprocess = {}
+    postprocess_nodes = {}
+
+    def add(class_type, **inputs):
+        key = f"c{len(graph) + 1}"
+        graph[key] = {"class_type": class_type, "inputs": inputs}
+        return [key, 0]
+
+    def prompt_for(key):
+        prompt = nodes[key].get("prompt", "").strip()
+        if not prompt and nodes[key]["kind"] != "upscale":
+            raise ValueError(f"请先填写「{nodes[key]['label']}」的提示词")
+        image_index = 0
+        for source in incoming[key]:
+            data = nodes[source]
+            if data["kind"] != "text":
+                image_index += 1
+            replacement = data.get("prompt", "") if data["kind"] == "text" else f"<Picture {image_index}>"
+            prompt = prompt.replace("@" + data["label"], replacement)
+        return prompt
+
+    def build(key, force=False):
+        if key in visiting:
+            raise ValueError("不能创建循环参考")
+        if key in resolved:
+            return resolved[key]
+        data, kind = nodes[key], nodes[key]["kind"]
+        if kind == "text":
+            return None
+        visiting.add(key)
+        if data.get("asset_id") and not force:
+            if data.get("media_type", "image/png").split("/")[0] != "image":
+                raise ValueError("当前生成模型使用图片参考，请连接图片素材")
+            asset_id = data["asset_id"]
+            if asset_id not in assets:
+                assets.append(asset_id)
+            result = add("LoadImage", image=f"creative-{asset_id}.png")
+        elif kind == "upload":
+            raise ValueError(f"请先给「{data['label']}」上传素材")
+        elif kind in {"image", "video", "upscale"}:
+            if any(nodes[source]["kind"] in {"video", "audio"} for source in incoming[key]):
+                raise ValueError("当前生成模型使用图片参考，请连接图片输出")
+            references = [build(source, force=source in targets) for source in incoming[key] if nodes[source]["kind"] != "text"]
+            prompt = prompt_for(key)
+            seed = data.get("seed", secrets.randbits(32))
+            if type(seed) is not int or not 0 <= seed < 2**53:
+                raise ValueError("随机种子无效")
+            if kind == "image":
+                width, height = dimensions(data)
+                if data.get("quality", "标准") not in {"标准", "精细"}:
+                    raise ValueError("请选择标准或精细质量")
+                model = data.get("model", "minimax-image")
+                if model == "minimax-image":
+                    if len(references) > 10:
+                        raise ValueError("MiniMax Image 最多使用 10 张参考图")
+                    models.add("minimax-image")
+                    unet = add("UNETLoader", unet_name="minimax_h3_image_pruned_int8_convrot.safetensors", weight_dtype="default")
+                    clip = add("CLIPLoader", clip_name="qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", type="minimax", device="default")
+                    vae = add("VAELoader", vae_name="minimax_h3_image_vae_fp16.safetensors")
+                    positive = add("MiniMaxH3ImageConditioning", clip=clip, vae=vae, prompt=prompt, width=width, height=height,
+                                   **{f"images.image_{i}": ref for i, ref in enumerate(references, 1)})
+                    latent = [positive[0], 1]
+                    negative = add("ConditioningZeroOut", conditioning=positive)
+                    steps, cfg, sampler, scheduler = 6, 1.0, "euler", "simple"
+                elif model == "moss-image":
+                    models.add("moss-image")
+                    unet = add("UNETLoader", unet_name="moss_image_sft_int8_convrot.safetensors", weight_dtype="default")
+                    clip = add("CLIPLoader", clip_name="qwen3.5_9b_w4a8_gptq.safetensors", type="moss_image", device="default")
+                    vae = add("VAELoader", vae_name="flux2-vae_small.safetensors")
+                    latent = add("EmptyFlux2LatentImage", width=width, height=height, batch_size=1)
+                    negative_prompt = "worst quality, bad anatomy, watermark, jpeg artifact"
+                    if references:
+                        models.add("moss-edit")
+                        unet = add("LoraLoaderModelOnly", model=unet, lora_name="moss_image_edit_lora_rank_64_bf16.safetensors", strength_model=1.0)
+                        if len(references) > 4:
+                            raise ValueError("MOSS Image 最多使用 4 张参考图")
+                        ref_inputs = {f"images.image_{i}": add("ImageScaleToTotalPixels", image=ref, upscale_method="lanczos", megapixels=1.0, resolution_steps=16)
+                                      for i, ref in enumerate(references)}
+                        positive = add("TextEncodeMOSSImageEdit", clip=clip, vae=vae, prompt=prompt,
+                                       edit_format="Moss-Image-Edit", image_strength=1.0, **ref_inputs)
+                        negative = add("TextEncodeMOSSImageEdit", clip=clip, vae=vae, prompt=negative_prompt,
+                                       edit_format="Moss-Image-Edit", image_strength=1.0, **ref_inputs)
+                        steps, cfg, sampler, scheduler = 30, 4.0, "euler", "normal"
+                    else:
+                        positive = add("CLIPTextEncode", clip=clip, text=prompt)
+                        negative = add("CLIPTextEncode", clip=clip, text=negative_prompt)
+                        steps, cfg, sampler, scheduler = 25, 2.5, "er_sde", "simple"
+                else:
+                    raise ValueError("图片模型只支持 MiniMax Image / MOSS Image")
+                sampled = add("KSampler", model=unet, positive=positive, negative=negative, latent_image=latent,
+                              seed=seed, steps=steps, cfg=cfg, sampler_name=sampler, scheduler=scheduler, denoise=1.0)
+                result = add("VAEDecode", samples=sampled, vae=vae)
+                if data.get("quality") == "精细":
+                    models.add("upscale")
+                    upscaler = add("UpscaleModelLoader", model_name="RealESRGAN_x4plus.pth")
+                    enhanced = add("ImageUpscaleWithModel", upscale_model=upscaler, image=result)
+                    result = add("ImageScale", image=enhanced, upscale_method="lanczos", width=width, height=height, crop="disabled")
+                saved = add("SaveImage", images=result, filename_prefix="creative")
+            elif kind == "video":
+                if len(references) > 2:
+                    raise ValueError("H3 首尾帧模式最多连接两张图片")
+                width, height = dimensions(data, video=True)
+                duration, fps = data.get("duration", 5), data.get("fps", 24)
+                if type(duration) not in (int, float) or not 5 <= duration <= 15 or fps not in (24, 30):
+                    raise ValueError("H3 支持 5–15 秒，输出帧率可选 24 / 30")
+                mode = data.get("mode", "首尾帧")
+                if mode not in {"首尾帧", "首帧", "首尾循环"}:
+                    raise ValueError("请选择首帧、首尾帧或首尾循环")
+                if mode != "首尾帧" and len(references) > 1:
+                    raise ValueError("首帧 / 首尾循环模式只需一张图片，请移除多余连线")
+                for role in ("first", "last"):
+                    if sum(roles[(key, s)] == role for s in incoming[key]) > 1:
+                        raise ValueError("首帧和尾帧各只能指定一张图片")
+                if any(roles[(key, s)] == "last" for s in incoming[key]) and (len(references) < 2 or mode != "首尾帧"):
+                    raise ValueError("指定尾帧时，请选择首尾帧模式并连接首帧图片")
+                models.add("minimax-h3")
+                template = json.loads((ROOT / "templates/h3-int8.json").read_text())
+                mapping = {old: f"c{len(graph) + index + 1}" for index, old in enumerate(template)}
+                for old, node in template.items():
+                    graph[mapping[old]] = {"class_type": node["class_type"], "inputs": {
+                        name: [mapping[value[0]], value[1]] if isinstance(value, list) else value
+                        for name, value in node["inputs"].items()}}
+                inputs = graph[mapping["5"]]["inputs"]
+                length = 5 + 17 * math.ceil((duration * 24 - 5) / 17)
+                inputs.update(prompt=prompt, width=width, height=height, length=length)
+                scaled = [add("ImageScale", image=ref, upscale_method="lanczos", width=width, height=height, crop="center") for ref in references]
+                if scaled:
+                    inputs["first_frame"] = scaled[0]
+                    if mode == "首尾循环":
+                        inputs["last_frame"] = scaled[0]
+                    elif mode == "首尾帧" and len(scaled) > 1:
+                        inputs["last_frame"] = scaled[1]
+                graph[mapping["11"]]["inputs"]["noise_seed"] = seed
+                if not data.get("audio", False):
+                    del graph[mapping["14"]]
+                    del graph[mapping["15"]]["inputs"]["audio"]
+                saved, result = [mapping["16"], 0], [mapping["15"], 0]
+                postprocess_nodes[key] = {"fps": fps, "duration": duration, "loop": mode == "首尾循环"}
+                if key == targets[0]:
+                    postprocess.update(fps=fps, duration=duration, loop=mode == "首尾循环")
+            else:
+                if len(references) != 1:
+                    raise ValueError("超分节点需要连接一张图片")
+                models.add("upscale")
+                scale = data.get("resolution", "2×")
+                if scale not in {"2×", "4×"}:
+                    raise ValueError("超分倍数可选 2× / 4×")
+                upscaler = add("UpscaleModelLoader", model_name="RealESRGAN_x4plus.pth")
+                result = add("ImageUpscaleWithModel", upscale_model=upscaler, image=references[0])
+                if scale == "2×":
+                    result = add("ImageScaleBy", image=result, upscale_method="lanczos", scale_by=.5)
+                saved = add("SaveImage", images=result, filename_prefix="creative-upscale")
+            outputs[saved[0]] = key
+        else:
+            raise ValueError("这个节点不支持直接生成")
+        visiting.remove(key)
+        resolved[key] = result
+        return result
+
+    for target in targets:
+        build(target, force=True)
+    return {"graph": graph, "asset_ids": assets, "models": sorted(models), "output_nodes": outputs,
+            "postprocess": postprocess, "postprocess_nodes": postprocess_nodes, "target_node": targets[0], "target_nodes": targets}
