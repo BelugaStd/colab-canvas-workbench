@@ -5,6 +5,7 @@ import shlex
 import signal
 import socket
 import subprocess
+import time
 from pathlib import Path
 
 from .config import ROOT
@@ -123,26 +124,44 @@ class Colab:
         proxy_args = [python, str(ROOT / "backend/bridge.py"), str(launcher), session, identity]
         proxy = subprocess.list2cmdline(proxy_args) if os.name == "nt" else shlex.join(proxy_args)
         log_path = self.directory / f"{account}-ssh.log"
-        with log_path.open("ab") as log:
-            proc = await asyncio.create_subprocess_exec(
-                "ssh", "-N", "-T", "-i", identity,
-                "-o", f"ProxyCommand={proxy}", "-o", "BatchMode=yes",
-                "-o", "IdentitiesOnly=yes", "-o", "ExitOnForwardFailure=yes",
-                "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=3",
-                "-o", "ConnectTimeout=30", "-o", "StrictHostKeyChecking=no",
-                "-o", f"UserKnownHostsFile={os.devnull}", "-o", "LogLevel=ERROR",
-                "-L", f"127.0.0.1:{port}:127.0.0.1:8188",
-                "-L", f"127.0.0.1:{telemetry_port}:127.0.0.1:8189", "root@colab-runtime",
-                stdout=log, stderr=log, start_new_session=True,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                env={**os.environ, "PYTHONUTF8": "1"},
-            )
-        self.tunnels[account] = proc
-        self.telemetry_ports[account] = telemetry_port
-        await asyncio.sleep(1)
-        if proc.returncode is not None:
-            raise RuntimeError(clean(log_path.read_text(errors="replace")))
-        return port
+        for attempt in range(5):
+            offset = log_path.stat().st_size if log_path.exists() else 0
+            with log_path.open("ab") as log:
+                proc = await asyncio.create_subprocess_exec(
+                    "ssh", "-N", "-T", "-i", identity,
+                    "-o", f"ProxyCommand={proxy}", "-o", "BatchMode=yes",
+                    "-o", "IdentitiesOnly=yes", "-o", "ExitOnForwardFailure=yes",
+                    "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=3",
+                    "-o", "ConnectTimeout=30", "-o", "StrictHostKeyChecking=no",
+                    "-o", f"UserKnownHostsFile={os.devnull}", "-o", "LogLevel=ERROR",
+                    "-L", f"127.0.0.1:{port}:127.0.0.1:8188",
+                    "-L", f"127.0.0.1:{telemetry_port}:127.0.0.1:8189", "root@colab-runtime",
+                    stdout=log, stderr=log, start_new_session=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                    env={**os.environ, "PYTHONUTF8": "1"},
+                )
+            self.tunnels[account] = proc
+            deadline = time.monotonic() + 40
+            while proc.returncode is None and time.monotonic() < deadline:
+                await asyncio.sleep(0.15)
+                try:
+                    _, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), timeout=0.5)
+                except (OSError, TimeoutError):
+                    continue
+                writer.close()
+                await writer.wait_closed()
+                if proc.returncode is None:
+                    self.telemetry_ports[account] = telemetry_port
+                    return port
+            await self.close_tunnel(account)
+            with log_path.open("rb") as log:
+                log.seek(offset)
+                error = clean(log.read().decode(errors="replace"))
+            # WARN: A stale SSH lease must only retry the same runtime, never allocate a replacement.
+            if "Already-active SSH session" in error and attempt < 4:
+                await asyncio.sleep(2 ** (attempt + 1))
+                continue
+            raise RuntimeError(error or "SSH 端口转发未就绪；保留原 GPU 会话，请重试连接")
 
     async def close_tunnel(self, account):
         self.telemetry_ports.pop(account, None)

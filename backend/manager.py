@@ -79,14 +79,14 @@ class Manager:
                 await self.colab.close_tunnel(account)
             return self.store.get("accounts", account)
 
-    def request_start(self, account, full=False):
+    def request_start(self, account, full=False, reconnect_only=False):
         if account in self.stopping:
             raise ValueError("机器正在停止，请稍候")
         if account not in self.start_tasks or self.start_tasks[account].done():
-            self.start_tasks[account] = asyncio.create_task(self.start(account, full))
+            self.start_tasks[account] = asyncio.create_task(self.start(account, full, reconnect_only))
         return self.machine(account)
 
-    async def start(self, account, full=False):
+    async def start(self, account, full=False, reconnect_only=False):
         async with self.locks[account]:
             machine = self.machine(account)
             if machine["phase"] == "ready":
@@ -100,8 +100,8 @@ class Manager:
                         self.machine(account, phase="ready", message="全部模型已就绪", last_activity=time.time())
                     self.ensure_worker(account)
                     return
-                except Exception:
-                    pass
+                except Exception as exc:
+                    self.log(account, f"原连接检查失败，核对原会话后重连：{exc}")
             try:
                 self.machine(account, phase="checking", message="核对账号与云端会话")
                 sessions = await self.colab.sessions(account)
@@ -115,6 +115,38 @@ class Manager:
                         if job.get("prompt_id"):
                             self.job(job["id"], status="failed", message="原云端会话已释放，无法恢复输出。请新建任务。")
                     session = None
+                if reconnect_only and not session:
+                    raise RuntimeError("原云端会话已释放；自动重连不会申请新 GPU，请手动连接服务器")
+                if session:
+                    self.machine(account, phase="checking", message="重新连接原 GPU，保留模型与任务")
+                    self.log(account, f"重新连接原会话 {session}，先检查现有服务")
+                    port = await self.colab.tunnel(account, session, self.store.get("settings", "main")["identity"])
+                    self.machine(account, port=port, telemetry_port=self.colab.telemetry_ports.get(account))
+                    try:
+                        stats = await self.remote(account, "GET", "/system_stats", timeout=10)
+                    except (aiohttp.ClientError, TimeoutError, RuntimeError) as exc:
+                        probe = self.store.directory / f"{account}-probe.py"
+                        probe.write_text(
+                            "import urllib.request\n"
+                            "try:\n"
+                            " with urllib.request.urlopen('http://127.0.0.1:8188/system_stats',timeout=5) as r:\n"
+                            "  print('WB_RUNTIME:ready' if r.status==200 else 'WB_RUNTIME:missing')\n"
+                            "except Exception:\n print('WB_RUNTIME:missing')\n"
+                        )
+                        status = await self.colab.execute(account, session, probe)
+                        if 'WB_RUNTIME:missing' not in status or reconnect_only:
+                            raise ConnectionError("原 GPU 会话仍在，通道尚未恢复；保留原任务与环境，请重试连接") from exc
+                        self.log(account, "已确认原会话内 ComfyUI 未响应，修复服务")
+                    else:
+                        if full:
+                            self.machine(account, message="原 GPU 已重连，检查所需模型")
+                            await self.prepare_models(account=account, models=CREATIVE_MODELS)
+                        if account in self.stopping:
+                            return
+                        self.machine(account, phase="ready", message="原 GPU 已重连，环境与任务已保留", stats=stats, last_activity=time.time())
+                        self.log(account, "原服务已恢复，未重新部署；继续查询原任务")
+                        self.ensure_worker(account)
+                        return
                 if not session:
                     install = self.store.get("meta", "install")["id"]
                     session = f"wb-{install}-{account[-1]}-{uuid.uuid4().hex[:6]}"
@@ -246,6 +278,7 @@ class Manager:
             self.workers[account] = asyncio.create_task(self.worker(account))
 
     async def worker(self, account):
+        reconnect_attempts = {}
         while not self.closing and account not in self.stopping:
             jobs = self.active_jobs(account)
             if not jobs:
@@ -254,8 +287,9 @@ class Manager:
             self.inflight_jobs.add(job["id"])
             try:
                 if self.machine(account)["phase"] != "ready":
-                    self.job(job["id"], status="preparing", message="准备云端计算环境")
-                    self.request_start(account)
+                    self.job(job["id"], status="recovering" if job.get("prompt_id") else "preparing",
+                             message="重新连接并查询原任务" if job.get("prompt_id") else "准备云端计算环境")
+                    self.request_start(account, reconnect_only=bool(job.get("prompt_id")))
                     # Cancelling a worker must not cancel an allocation request: its result
                     # is needed to identify and release the newly assigned cloud machine.
                     await asyncio.shield(self.start_tasks[account])
@@ -273,7 +307,17 @@ class Manager:
                 self.job(job["id"], status="recovering" if recoverable else "failed", message=clean(f"{type(exc).__name__}: {exc}"), ended_at=time.time())
                 self.log(account, f"任务 {job['id'][:8]}：{exc}")
                 if recoverable:
-                    self.machine(account, phase="disconnected", message="连接中断；重新连接后查询原任务")
+                    self.machine(account, phase="disconnected", message="连接中断，正在重连原 GPU")
+                    attempts = reconnect_attempts.get(job['id'], 0) + 1
+                    reconnect_attempts[job['id']] = attempts
+                    if attempts <= 2:
+                        self.job(job['id'], message="连接中断，正在重连原 GPU 并查询原任务")
+                        self.request_start(account, reconnect_only=True)
+                        await asyncio.shield(self.start_tasks[account])
+                        if self.machine(account)['phase'] == 'ready':
+                            continue
+                    elif self.machine(account)['phase'] == 'disconnected':
+                        self.machine(account, message="连接持续中断，请手动重连；原任务未重复提交")
                     return
             finally:
                 self.inflight_jobs.discard(job["id"])

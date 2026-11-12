@@ -109,6 +109,69 @@ async def test_recovery_reads_history_without_resubmitting(rig):
     assert len(fake.prompt_posts) == posts
 
 
+async def test_reconnect_live_runtime_recovers_output_without_bootstrap(rig):
+    manager, fake, _ = rig
+    job = manager.submit('colab2', template(), 'Reconnect', False)
+    await eventually(lambda: manager.job(job['id'])['status'] == 'completed')
+    session = manager.machine('colab2')['session']
+    calls = list(fake.calls)
+    posts = len(fake.prompt_posts)
+    manager.job(job['id'], status='recovering', outputs=[])
+    manager.machine('colab2', phase='disconnected', port=None)
+    await manager.start('colab2')
+    await eventually(lambda: manager.job(job['id'])['status'] == 'completed')
+    assert manager.machine('colab2')['session'] == session
+    assert len(fake.prompt_posts) == posts
+    assert [c for c in fake.calls if c[1] in {'exec', 'create'}] == [c for c in calls if c[1] in {'exec', 'create'}]
+
+
+async def test_submitted_job_reconnects_after_transport_failure(rig, monkeypatch):
+    import aiohttp
+
+    manager, fake, _ = rig
+    remote = manager.remote
+    dropped = False
+    async def disconnect_once(account, method, path, *args, **kwargs):
+        nonlocal dropped
+        if path.startswith('/history/') and not dropped:
+            dropped = True
+            raise aiohttp.ClientConnectionError('test SSH connection lost')
+        return await remote(account, method, path, *args, **kwargs)
+    monkeypatch.setattr(manager, 'remote', disconnect_once)
+    job = manager.submit('colab2', template(), 'Transient connection loss', False)
+    await eventually(lambda: manager.job(job['id'])['status'] == 'completed', timeout=6)
+    assert dropped
+    assert len(fake.prompt_posts) == 1
+    assert len([c for c in fake.calls if c[1] == 'create']) == 1
+    assert len([c for c in fake.calls if c[1] == 'exec']) == 1
+
+
+async def test_automatic_recovery_never_allocates_a_replacement_runtime(rig):
+    manager, fake, store = rig
+    store.put('jobs', 'gone', {'id': 'gone', 'account': 'colab2', 'status': 'recovering',
+                             'prompt_id': 'original-prompt', 'created_at': time.time()})
+    manager.machine('colab2', phase='disconnected', session='wb-original-missing')
+    manager.resume('gone')
+    await eventually(lambda: manager.workers['colab2'].done())
+    assert manager.job('gone')['status'] == 'failed'
+    assert not any(c[1] in {'create', 'exec'} for c in fake.calls)
+    assert not fake.prompt_posts
+
+
+async def test_tunnel_failure_does_not_trigger_redeployment(rig, monkeypatch):
+    manager, fake, _ = rig
+    await manager.start('colab2')
+    calls = list(fake.calls)
+    async def failed_tunnel(*args):
+        raise RuntimeError('Already-active SSH session (HTTP 429)')
+    monkeypatch.setattr(fake, 'tunnel', failed_tunnel)
+    manager.machine('colab2', phase='disconnected', port=None)
+    await manager.start('colab2')
+    assert manager.machine('colab2')['phase'] == 'error'
+    assert '429' in manager.machine('colab2')['message']
+    assert [c for c in fake.calls if c[1] in {'create', 'exec'}] == [c for c in calls if c[1] in {'create', 'exec'}]
+
+
 async def test_unknown_old_session_does_not_rerun_submitted_job(rig):
     manager, fake, store = rig
     store.put('jobs', 'lost', {'id': 'lost', 'account': 'colab2', 'status': 'recovering', 'prompt_id': 'old-prompt', 'created_at': time.time()})
