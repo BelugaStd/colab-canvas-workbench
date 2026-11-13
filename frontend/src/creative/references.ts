@@ -1,6 +1,6 @@
 import type { Edge } from '@xyflow/react'
 import type { CardData, CanvasData, CreativeNode } from './types'
-import { imageModel } from './imageModels'
+import { imageModel } from './imageModels.ts'
 
 export function referencesFor(id: string, canvas: Pick<CanvasData, 'nodes'|'edges'>) {
   let images = 0, texts = 0
