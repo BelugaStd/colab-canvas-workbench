@@ -2,14 +2,18 @@ import GlassSelect from './GlassSelect'
 import { motion, MotionConfig } from 'motion/react'
 import { Presence, Surface, transition, useDismiss } from './Motion'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowLeft, Check, ChevronDown, ChevronRight, Cloud, Copy, Folder, FolderPlus, Grid2X2, Hash, Home, Image, LayoutGrid, List, LoaderCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Search, Trash2, Undo2, X } from 'lucide-react'
+import { ArrowLeft, Check, ChevronDown, ChevronRight, Cloud, Copy, Folder, FolderPlus, Grid2X2, Hash, Home, Image, LayoutGrid, List, LoaderCircle, MessageSquare, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Search, Sparkles, Trash2, Undo2, X } from 'lucide-react'
 import Canvas from './Canvas'
+import AgentPanel from './AgentPanel'
+import { mergeAgentProject, preserveCanvasSelection } from './agentSync'
+import type { AgentSession, AgentSessionSummary } from './agentTypes'
 import { mergeCompleted } from './versions'
 import AssetLibrary from './AssetLibrary'
 import { MiniCompute, ComputePanel } from './Compute'
-import { api, assetUrl, cleanCanvas, setToken, uid, type Asset, type CanvasData, type Project, type ProjectSummary } from './types'
+import { api, ApiError, assetUrl, cleanCanvas, newNode, setToken, uid, upload, type Asset, type CanvasData, type CreativeNode, type Project, type ProjectSummary } from './types'
 import { type State } from '../types'
 import './creative.css'
+import './agent.css'
 
 type DialogState = { title: string; value: string; submit: (value: string) => Promise<void> }
 const contentKey = (p: Project) => JSON.stringify({ name:p.name, folder_id:p.folder_id, canvases:p.canvases.map(cleanCanvas) })
@@ -26,35 +30,81 @@ export default function CreativeApp() {
   const [addRequest,setAddRequest]=useState(0)
   const [library,setLibrary]=useState(false),[assetRequest,setAssetRequest]=useState<(Asset&{requestId:string})|null>(null)
   const [selectedProjects,setSelectedProjects]=useState<string[]>([])
+  const [agentOpen,setAgentOpen]=useState(false), [agentSessions,setAgentSessions]=useState<AgentSessionSummary[]>([])
+  const [agentSessionIds,setAgentSessionIds]=useState<Record<string,string>>({})
+  const [fitRequests,setFitRequests]=useState<Record<string,number>>({})
   useDismiss(!!dialog||!!moveItem,()=>{setDialog(null);setMoveItem(null)})
   useDismiss(!!menu,()=>setMenu(null))
   const toggleProject=(id:string)=>setSelectedProjects(ids=>ids.includes(id)?ids.filter(x=>x!==id):[...ids,id])
   const current=useRef(project); current.current=project
   const saved=useRef<Record<string,string>>({}), revisions=useRef<Record<string,number>>({}), saveChain=useRef<Promise<void>>(Promise.resolve())
+  const bases=useRef<Record<string,Project>>({}), known=useRef<Record<string,Project>>({})
+  if(project)known.current[project.id]=project
   const fetchItems=useCallback(async()=>setItems(await api<ProjectSummary[]>('/projects')),[])
   const refresh=useCallback(async()=>{const next=await api<State>('/state');setToken(next.token);setState(next)},[])
   const fail=useCallback((message:string)=>setError(message),[])
 
-  const persist=useCallback(async(p:Project)=>{
-    const snapshot={...p,canvases:p.canvases.map(cleanCanvas)}, key=contentKey(snapshot)
-    const operation=saveChain.current.catch(()=>{}).then(async()=>{
-      if(saved.current[p.id]===key)return
-      setSaveStatus('保存中…')
-      try {
-        const result=await api<Project>('/projects/'+p.id,'PUT',{...snapshot,revision:revisions.current[p.id]??p.revision})
-        revisions.current[p.id]=result.revision;saved.current[p.id]=key
-        if(current.current?.id===p.id)setSaveStatus(contentKey(current.current)===key?'已保存':'保存中…')
-      }catch(e){setSaveStatus('保存失败');setError((e as Error).message);throw e}
-    });saveChain.current=operation;await operation
+  const receiveRemote=useCallback((remote:Project,submitted?:Project)=>{
+    if(remote.revision<(revisions.current[remote.id]??0))return
+    const local=current.current?.id===remote.id?current.current:known.current[remote.id]
+    const base=submitted??bases.current[remote.id]??remote
+    const result=local?mergeAgentProject(base,{...local,canvases:local.canvases.map(cleanCanvas)},remote):{project:remote,conflicts:[]}
+    const next=local?preserveCanvasSelection(local,result.project):result.project
+    bases.current[remote.id]=remote;revisions.current[remote.id]=remote.revision;saved.current[remote.id]=contentKey(remote);known.current[remote.id]=next
+    if(result.conflicts.length)setError(`Agent 与你同时修改了 ${result.conflicts.length} 处内容，已保留你的编辑，请检查：${result.conflicts.slice(0,3).join('、')}`)
+    if(current.current?.id===remote.id){
+      if(local&&!submitted){const added=next.canvases.filter(canvas=>{const previous=local.canvases.find(item=>item.id===canvas.id);return canvas.nodes.some(node=>!previous?.nodes.some(item=>item.id===node.id))});if(added.length)setFitRequests(previous=>({...previous,...Object.fromEntries(added.map(canvas=>[canvas.id,(previous[canvas.id]??0)+1]))}))}
+      current.current=next;setProject(next);setSaveStatus(contentKey(next)===saved.current[remote.id]?'已保存':'保存中…')
+    }
   },[])
-  async function flushCurrent() {
+
+  const persist=useCallback(async(p:Project)=>{
+    const operation=saveChain.current.catch(()=>{}).then(async()=>{
+      for(let attempt=0;attempt<4;attempt++){
+        const latest=current.current?.id===p.id?current.current:known.current[p.id]??p
+        const snapshot={...latest,canvases:latest.canvases.map(cleanCanvas)},key=contentKey(snapshot)
+        if(saved.current[p.id]===key)return
+        setSaveStatus('保存中…')
+        try {
+          const result=await api<Project>('/projects/'+p.id,'PUT',{...snapshot,revision:revisions.current[p.id]??snapshot.revision})
+          receiveRemote(result,snapshot);return
+        }catch(e){
+          if(e instanceof ApiError&&e.status===409&&attempt<3){receiveRemote(await api<Project>('/projects/'+p.id));continue}
+          setSaveStatus('保存失败');setError((e as Error).message);throw e
+        }
+      }
+    });saveChain.current=operation;await operation
+  },[receiveRemote])
+  const flushCurrent=useCallback(async()=>{
     const id=current.current?.id
     while(current.current?.id===id && current.current && saved.current[id!]!==contentKey(current.current)) await persist(current.current)
-  }
+  },[persist])
   useEffect(()=>{let alive=true;Promise.all([refresh(),fetchItems()]).then(async()=>{
     const id=location.hash.match(/^#project=([\w-]+)/)?.[1]
-    if(id&&alive){const p=await api<Project>('/projects/'+id);revisions.current[p.id]=p.revision;saved.current[p.id]=contentKey(p);setProject(p);setCanvasId(p.canvases[0]?.id??'')}
+    if(id&&alive){const p=await api<Project>('/projects/'+id);if(!alive||location.hash!=='#project='+id||current.current?.id===id)return;bases.current[p.id]=p;known.current[p.id]=p;revisions.current[p.id]=p.revision;saved.current[p.id]=contentKey(p);current.current=p;setProject(p);setCanvasId(p.canvases[0]?.id??'')}
   }).catch(e=>setError(e.message));const timer=setInterval(()=>refresh().catch(()=>setError('本地服务连接中断，请检查启动窗口')),3000);return()=>{alive=false;clearInterval(timer)}},[refresh,fetchItems])
+  useEffect(()=>{
+    let alive=true,sequence=0
+    async function navigate(){
+      const epoch=++sequence,hash=location.hash,id=hash.match(/^#project=([\w-]+)$/)?.[1]??null
+      if(id===(current.current?.id??null)){setBusy(false);return}
+      setBusy(true);setError('')
+      try{
+        await flushCurrent()
+        if(!alive||epoch!==sequence||location.hash!==hash)return
+        const next=id?await api<Project>('/projects/'+id):null
+        if(!id)await fetchItems()
+        await flushCurrent()
+        if(!alive||epoch!==sequence||location.hash!==hash)return
+        if(next){bases.current[next.id]=next;known.current[next.id]=next;revisions.current[next.id]=next.revision;saved.current[next.id]=contentKey(next)}
+        current.current=next;setProject(next);setCanvasId(next?.canvases[0]?.id??'');setSaveStatus('已保存');setMenu(null);setCanvasMenu(null)
+      }catch(e){if(alive&&epoch===sequence)setError((e as Error).message)}
+      finally{if(alive&&epoch===sequence)setBusy(false)}
+    }
+    const handler=()=>void navigate()
+    window.addEventListener('hashchange',handler)
+    return()=>{alive=false;sequence++;window.removeEventListener('hashchange',handler)}
+  },[flushCurrent,fetchItems])
   useEffect(()=>{if(!project||saved.current[project.id]===contentKey(project))return;setSaveStatus('保存中…');const timer=setTimeout(()=>persist(project).catch(()=>{}),600);return()=>clearTimeout(timer)},[project,persist])
   useEffect(()=>{const handler=(e:BeforeUnloadEvent)=>{if(current.current&&saved.current[current.current.id]!==contentKey(current.current)){e.preventDefault();e.returnValue=''}};window.addEventListener('beforeunload',handler);return()=>window.removeEventListener('beforeunload',handler)},[])
   useEffect(()=>{if(!notice)return;const timer=setTimeout(()=>setNotice(''),3500);return()=>clearTimeout(timer)},[notice])
@@ -66,14 +116,14 @@ export default function CreativeApp() {
   async function action(fn:()=>Promise<void>){setBusy(true);setError('');try{await fn()}catch(e){setError((e as Error).message)}finally{setBusy(false)}}
   async function open(item:ProjectSummary){await action(async()=>{
     if(item.kind==='folder'){setFolderId(item.id);return}
-    const p=await api<Project>('/projects/'+item.id);await flushCurrent();revisions.current[p.id]=p.revision;saved.current[p.id]=contentKey(p);setProject(p);setCanvasId(p.canvases[0]?.id??'');setSaveStatus('已保存');location.hash='project='+p.id
+    await flushCurrent();const p=await api<Project>('/projects/'+item.id);bases.current[p.id]=p;known.current[p.id]=p;revisions.current[p.id]=p.revision;saved.current[p.id]=contentKey(p);current.current=p;setProject(p);setCanvasId(p.canvases[0]?.id??'');setSaveStatus('已保存');location.hash='project='+p.id
   })}
   async function create(kind:'project'|'folder',name='Untitled'){await action(async()=>{
     await flushCurrent()
     const p=await api<Project>('/projects','POST',{kind,name,folder_id:folderId});await fetchItems()
-    if(kind==='project'){await flushCurrent();revisions.current[p.id]=p.revision;saved.current[p.id]=contentKey(p);setProject(p);setCanvasId(p.canvases[0].id);location.hash='project='+p.id}
+    if(kind==='project'){await flushCurrent();bases.current[p.id]=p;known.current[p.id]=p;revisions.current[p.id]=p.revision;saved.current[p.id]=contentKey(p);current.current=p;setProject(p);setCanvasId(p.canvases[0].id);location.hash='project='+p.id}
   })}
-  async function back(){await action(async()=>{await flushCurrent();await fetchItems();await flushCurrent();setProject(null);setMenu(null);location.hash=''})}
+  async function back(){await action(async()=>{await flushCurrent();await fetchItems();await flushCurrent();current.current=null;setProject(null);setMenu(null);location.hash=''})}
   function rename(item:ProjectSummary|Project){setMenu(null);setDialog({title:item.kind==='folder'?'重命名文件夹':'重命名项目',value:item.name,submit:async name=>{
     if(current.current?.id===item.id){setProject(p=>p?{...p,name}:p)}else{await api('/projects/'+item.id,'PATCH',{name});await fetchItems()}
   }})}
@@ -82,8 +132,54 @@ export default function CreativeApp() {
   function inheritedTrash(item:ProjectSummary){const seen=new Set<string>();let p:ProjectSummary|undefined=item;while(p){if(p.deleted_at)return true;if(!p.folder_id||seen.has(p.id))return false;seen.add(p.id);p=items.find(x=>x.id===p!.folder_id)}return false}
   const shown=items.filter(p=>trash?!!p.deleted_at:!inheritedTrash(p)&&(query||p.folder_id===folderId)).filter(p=>p.name.toLowerCase().includes(query.toLowerCase())).filter(p=>filter==='全部'||(filter==='项目'?p.kind==='project':p.kind==='folder'))
   const canvas=project?.canvases.find(c=>c.id===canvasId)??project?.canvases[0]
+  const sessionsContext=project&&canvas?project.id+':'+canvas.id:''
+  const latestSessionsContext=useRef(sessionsContext);latestSessionsContext.current=sessionsContext
+  const refreshAgentSessions=useCallback(async()=>{
+    const source=current.current,c=source?.canvases.find(item=>item.id===canvasId)??source?.canvases[0]
+    if(!source||!c)return
+    const context=source.id+':'+c.id
+    const result=await api<AgentSessionSummary[]>(`/agent/sessions?project_id=${encodeURIComponent(source.id)}&canvas_id=${encodeURIComponent(c.id)}`)
+    if(context===latestSessionsContext.current)setAgentSessions(result)
+  },[canvasId])
+  useEffect(()=>{setAgentSessions([]);void refreshAgentSessions().catch(e=>setError(e.message))},[sessionsContext,refreshAgentSessions])
+  useEffect(()=>{
+    if(!project)return
+    const id=project.id
+    let alive=true,timer:ReturnType<typeof setTimeout>|undefined
+    async function poll(){
+      try{const remote=await api<Project>('/projects/'+id);if(alive&&remote.revision>(revisions.current[id]??0))receiveRemote(remote)}
+      catch(e){if(alive)setError('项目同步暂时中断，将继续重试：'+(e as Error).message)}
+      if(alive)timer=setTimeout(()=>void poll(),3000)
+    }
+    timer=setTimeout(()=>void poll(),3000)
+    return()=>{alive=false;if(timer)clearTimeout(timer)}
+  },[project?.id,receiveRemote])
+  async function newConversation(){if(!project||!canvas)return;const source=project.id,canvas_id=canvas.id;await action(async()=>{
+    await flushCurrent();const session=await api<AgentSession>('/agent/sessions','POST',{project_id:source,canvas_id})
+    setAgentSessionIds(previous=>({...previous,[canvas_id]:session.id}));setAgentOpen(true);await refreshAgentSessions()
+  })}
+  async function attachAgentAsset():Promise<CreativeNode|void>{
+    const source=current.current,c=source?.canvases.find(item=>item.id===canvas?.id)
+    if(!source||!c)return
+    const file=await new Promise<File|undefined>(resolve=>{const picker=document.createElement('input');picker.type='file';picker.accept='image/*,video/*,audio/*';picker.onchange=()=>resolve(picker.files?.[0]);picker.addEventListener('cancel',()=>resolve(undefined),{once:true});picker.click()})
+    if(!file)return
+    const asset=await upload(file),latest=current.current
+    if(!latest||latest.id!==source.id)throw new Error('项目已切换，素材已保存到素材库，请重新添加')
+    const target=latest.canvases.find(item=>item.id===c.id)
+    if(!target)throw new Error('原画布已删除，素材已保存在素材库')
+    const node=newNode('upload',{x:(200-target.viewport.x)/target.viewport.zoom,y:(180-target.viewport.y)/target.viewport.zoom})
+    Object.assign(node.data,{asset_id:asset.id,media_type:asset.media_type,width:asset.width,height:asset.height,label:asset.name.slice(0,100)})
+    const next={...latest,canvases:latest.canvases.map(item=>item.id===target.id?{...item,nodes:[...item.nodes,node]}:item)}
+    current.current=next;known.current[next.id]=next;setProject(next);return node
+  }
   const profile=state?.accounts.find(a=>a.id===account), machine=profile?.machine
-  async function generate(id:string|string[]){if(!current.current||!canvas)return;const source=current.current,sourceCanvas=canvas.id,sourceAccount=account;await action(async()=>{await persist(source);await api(Array.isArray(id)?`/projects/${source.id}/canvases/${sourceCanvas}/generate`:`/projects/${source.id}/canvases/${sourceCanvas}/nodes/${id}/generate`,'POST',{account:sourceAccount,stop_after:false,...(Array.isArray(id)?{nodes:id}:{})});await refresh();setNotice('任务已加入队列，环境会自动准备')})}
+  async function generate(id:string|string[]){
+    if(!current.current||!canvas)return
+    const source=current.current,sourceCanvas=canvas.id,sourceAccount=account,targets=new Set(Array.isArray(id)?id:[id])
+    const next={...source,canvases:source.canvases.map(c=>c.id===sourceCanvas?{...c,nodes:c.nodes.map(node=>targets.has(node.id)?{...node,data:{...node.data,version_selection:'auto' as const}}:node)}:c)}
+    current.current=next;known.current[next.id]=next;setProject(next)
+    await action(async()=>{await flushCurrent();await api(Array.isArray(id)?`/projects/${source.id}/canvases/${sourceCanvas}/generate`:`/projects/${source.id}/canvases/${sourceCanvas}/nodes/${id}/generate`,'POST',{account:sourceAccount,stop_after:false,...(Array.isArray(id)?{nodes:id}:{})});await refresh();setNotice('任务已加入队列，环境会自动准备')})
+  }
   function newCanvas(){if(!project)return;const c:CanvasData={id:uid(),name:'Untitled',nodes:[],edges:[],viewport:{x:0,y:0,zoom:.7142857}};setProject({...project,canvases:[...project.canvases,c]});setCanvasId(c.id)}
   function renameCanvas(c:CanvasData){setCanvasMenu(null);setDialog({title:'重命名画布',value:c.name,submit:async name=>{setProject(p=>p?{...p,canvases:p.canvases.map(x=>x.id===c.id?{...x,name}:x)}:p)}})}
   return <MotionConfig reducedMotion="user"><div className={`creative-app ${project?'cc-project-open':''}`} onClick={()=>menu&&setMenu(null)}>
@@ -103,15 +199,21 @@ export default function CreativeApp() {
           <button className="cc-tile-more" aria-label={item.name+' 的更多操作'} onClick={e=>{e.stopPropagation();setMenu({id:item.id,x:Math.min(e.clientX-120,window.innerWidth-200),y:e.clientY+12})}}><MoreHorizontal size={18}/></button>
         </article>)}
       </div>{!shown.length&&(query||trash)&&<div className="cc-no-projects">{trash?'回收站为空':'没有找到匹配的项目'}</div>}</main>
-    </Surface> : <Surface tone="fade" key={project.id} className={`cc-project-layout ${collapsed?'cc-sidebar-collapsed':''}`}>
+    </Surface> : <Surface tone="fade" key={project.id} className={`cc-project-layout cc-agent-layout ${collapsed?'cc-sidebar-collapsed':''}`}>
       <aside className="cc-sidebar"><div className="cc-sidebar-title"><button title="返回工作区" onClick={back}><span className="cc-logo"/></button><button className="cc-project-name" onClick={()=>rename(project)}>{project.name}</button><button aria-label="收起侧栏" onClick={()=>setCollapsed(true)}><PanelLeftClose size={16}/></button></div>
+        <button className="cc-side-link cc-agent-new" onClick={()=>void newConversation()}><Sparkles size={18}/>新建对话<Plus size={14}/></button>
         <button className="cc-side-link" onClick={()=>setAddRequest(v=>v+1)}><Plus size={18}/>添加节点</button><button className="cc-side-link" onClick={()=>setDialog({title:'搜索画布',value:'',submit:async value=>{const c=project.canvases.find(c=>c.name.includes(value)||c.nodes.some(n=>n.data.label.includes(value)));if(c)setCanvasId(c.id);else setNotice('没有找到匹配的画布')}})}><Search size={18}/>搜索</button><button className="cc-side-link" onClick={()=>setLibrary(true)}><Image size={18}/>素材库</button>
         <div className="cc-sidebar-section"><span>画布</span><button aria-label="新建画布" onClick={newCanvas}><Plus size={17}/></button></div>
         <div className="cc-canvas-list">{project.canvases.map(c=><div className={c.id===canvas?.id?'active':''} key={c.id}><button className="cc-canvas-select" onClick={()=>{setCanvasId(c.id);setCanvasMenu(null)}}><Hash size={17}/><span>{c.name}</span></button><button className="cc-canvas-more" aria-label={c.name+' 的画布操作'} onClick={()=>setCanvasMenu(canvasMenu===c.id?null:c.id)}><MoreHorizontal size={15}/></button><Presence>{canvasMenu===c.id&&<Surface className="cc-popover cc-canvas-list-menu"><button onClick={()=>renameCanvas(c)}><Pencil size={14}/>重命名</button><button onClick={()=>{const clone=structuredClone(c);clone.id=uid();clone.name+=' 副本';setProject({...project,canvases:[...project.canvases,clone]});setCanvasId(clone.id);setCanvasMenu(null)}}><Copy size={14}/>副本</button><button disabled={project.canvases.length===1} onClick={()=>{setProject({...project,canvases:project.canvases.filter(x=>x.id!==c.id)});setCanvasMenu(null)}}><Trash2 size={14}/>删除画布</button></Surface>}</Presence></div>)}</div>
+        <div className="cc-sidebar-section cc-conversation-section"><span>当前画布的对话</span><button aria-label="打开创作 Agent" onClick={()=>setAgentOpen(value=>!value)}><Sparkles size={16}/></button></div>
+        <div className="cc-agent-conversations">{agentSessions.map(session=><button key={session.id} className={agentOpen&&agentSessionIds[canvas?.id??'']===session.id?'active':''} onClick={()=>{if(canvas)setAgentSessionIds(previous=>({...previous,[canvas.id]:session.id}));setAgentOpen(true)}}><MessageSquare size={14}/><span>{session.title||'新对话'}</span>{['running','waiting','awaiting_approval'].includes(session.status)&&<i/>}</button>)}{!agentSessions.length&&<button className="cc-agent-empty-conversation" onClick={()=>void newConversation()}><MessageSquare size={14}/><span>开始创作对话</span></button>}</div>
         <div className="cc-sidebar-save"><Check size={13}/>{saveStatus}</div><MiniCompute account={profile} open={()=>setCompute(true)} refresh={refresh}/>
       </aside>
       <Presence>{collapsed&&<motion.button initial={{opacity:0,scale:.98}} animate={{opacity:1,scale:1}} exit={{opacity:0,scale:.98}} transition={transition} className="cc-expand-sidebar" aria-label="展开侧栏" onClick={()=>setCollapsed(false)}><PanelLeftOpen size={18}/></motion.button>}</Presence>
-      <Presence>{canvas&&<Canvas key={canvas.id} canvas={canvas} change={changeCanvas} fail={fail} generate={generate} addRequest={addRequest}
+      <div className="cc-agent-slot"><Presence>{agentOpen&&canvas&&<AgentPanel key={project.id+':'+canvas.id} project={project} canvas={canvas} account={account} close={()=>setAgentOpen(false)}
+        sessionId={agentSessionIds[canvas.id]} onSessionChange={id=>setAgentSessionIds(previous=>({...previous,[canvas.id]:id}))}
+        beforeSend={flushCurrent} onProjectChanged={receiveRemote} onAttachAsset={attachAgentAsset} onSessionsChanged={()=>void refreshAgentSessions().catch(e=>setError(e.message))}/>}</Presence></div>
+      <Presence>{canvas&&<Canvas key={canvas.id} canvas={canvas} change={changeCanvas} fail={fail} generate={generate} addRequest={addRequest} fitRequest={fitRequests[canvas.id]??0} openAgent={()=>setAgentOpen(true)}
         jobs={state?.jobs.filter(j=>j.creative?.project_id===project.id&&j.creative?.canvas_id===canvas.id)??[]}
         assetRequest={assetRequest} jobAction={(id,operation)=>action(async()=>{await api(`/jobs/${id}/${operation}`,'POST');await refresh()})}/>}</Presence>
     </Surface>}</Presence>

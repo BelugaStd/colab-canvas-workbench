@@ -8,8 +8,8 @@ export function versionsOf(data: CardData): NodeVersion[] {
     job_id: data.job_id, created_at: 0 }]
 }
 
-export function selectVersion(data: CardData, version: NodeVersion): CardData {
-  return { ...data, versions: versionsOf(data), active_version_id: version.id,
+export function selectVersion(data: CardData, version: NodeVersion, selection: 'auto' | 'manual' = 'manual'): CardData {
+  return { ...data, versions: versionsOf(data), active_version_id: version.id, version_selection: selection,
     asset_id: version.asset_id, media_type: version.media_type, job_id: version.job_id }
 }
 
@@ -40,13 +40,12 @@ export function mergeCompleted(project: Project, jobs: Job[]): Project {
         job_id: job.id, created_at: job.created_at, ...(settings ? { settings: structuredClone(settings) } : {}) }
       versions.push(added)
     }
-    // WARN: Polling must only activate unseen results, preserving the user's selected output version.
     if (added || enriched) {
       changed = true
       versions.sort((a, b) => a.created_at - b.created_at)
       data = { ...data, versions }
       const active = versions.find(v => v.asset_id === data.asset_id)
-      if (added && added.created_at >= (active?.created_at ?? 0)) data = selectVersion(data, added)
+      if (added && data.version_selection !== 'manual' && added.created_at >= (active?.created_at ?? 0)) data = selectVersion(data, added, 'auto')
     }
     return data === node.data ? node : { ...node, data }
   }) }))

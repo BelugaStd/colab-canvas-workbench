@@ -15,6 +15,7 @@ PRIVATE_SUFFIXES = {
     '.mp4', '.mov', '.webm', '.wav', '.mp3',
 }
 PATTERNS = {
+    'model API key': re.compile(rb'\bsk-[A-Za-z0-9_-]{24,}'),
     'private key': re.compile(rb'-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----'),
     'Google OAuth token': re.compile(rb'(?:ya29\.[A-Za-z0-9_-]{20,}|1//[A-Za-z0-9_-]{20,})'),
     'GitHub token': re.compile(rb'(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})'),

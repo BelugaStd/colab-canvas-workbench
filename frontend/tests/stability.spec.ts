@@ -1,6 +1,53 @@
 import { test, expect } from '@playwright/test'
 import { readFileSync } from 'node:fs'
 
+test('hash-only project navigation and browser history flush edits before switching', async ({ page }) => {
+  await page.goto('/')
+  const { token } = await (await page.request.get('/api/state')).json()
+  const headers = { 'X-Workbench-Token': token }, projects: any[] = []
+  for (const name of ['Hash project A', 'Hash project B']) {
+    const project = await (await page.request.post('/api/projects', { headers, data: { name } })).json()
+    project.canvases[0].nodes = [{ id: 'image', type: 'creative', position: { x: 100, y: 100 }, data: { kind: 'image', label: name, prompt: name, model: 'minimax-image' } }]
+    projects.push(await (await page.request.put('/api/projects/' + project.id, { headers, data: project })).json())
+  }
+  const [first, second] = projects
+  await page.goto('/?hash-navigation=1#project=' + first.id)
+  await expect(page.locator('.cc-project-name')).toHaveText(first.name)
+  await page.evaluate(() => { (window as any).__hashDocument = 'same document' })
+  await page.getByTestId('card-image').click()
+  const input = page.getByLabel('描述这张图片', { exact: true })
+  let unlock!: () => void
+  const gate = new Promise<void>(resolve => { unlock = resolve })
+  let intercepted = false
+  await page.route(`**/api/projects/${first.id}`, async route => {
+    if (route.request().method() === 'PUT' && !intercepted) { intercepted = true; await gate }
+    await route.continue()
+  })
+  await input.fill('First save before hash change')
+  await page.evaluate(id => { location.hash = 'project=' + id }, second.id)
+  await expect.poll(() => intercepted).toBe(true)
+  await input.fill('Latest edit while hash navigation waits')
+  unlock()
+  await expect(page.locator('.cc-project-name')).toHaveText(second.name)
+  await page.getByTestId('card-image').click()
+  await input.fill('Edited B before browser back')
+  await page.goBack()
+  await expect(page.locator('.cc-project-name')).toHaveText(first.name)
+  await page.getByTestId('card-image').click()
+  await expect(input).toHaveValue('Latest edit while hash navigation waits')
+  await page.goForward()
+  await expect(page.locator('.cc-project-name')).toHaveText(second.name)
+  await page.getByTestId('card-image').click()
+  await expect(input).toHaveValue('Edited B before browser back')
+  await page.evaluate(() => { location.hash = '' })
+  await expect(page.locator('.cc-home-page')).toBeVisible()
+  await page.goBack()
+  await expect(page.locator('.cc-project-name')).toHaveText(second.name)
+  await page.getByTestId('card-image').click()
+  await expect(input).toHaveValue('Edited B before browser back')
+  expect(await page.evaluate(() => (window as any).__hashDocument)).toBe('same document')
+})
+
 test('leaving a project saves edits made while its first save is still pending', async ({ page }) => {
   await page.goto('/')
   await page.getByRole('button', { name: '新建项目', exact: true }).first().click()

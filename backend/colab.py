@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import os
 import re
 import shlex
@@ -130,6 +131,29 @@ class Colab:
 
     async def execute(self, account, session, script):
         return await self.command(account, "exec", "-s", session, "-f", str(script), "--timeout", "90", timeout=120)
+
+    async def download(self, account, session, remote, destination):
+        launcher = self.launcher(account)
+        process = await asyncio.create_subprocess_exec(
+            launcher_python(launcher), str(ROOT / 'backend/file_transfer.py'), launcher, session, remote, str(destination),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+            env={**os.environ, 'NO_COLOR': '1', 'TERM': 'dumb', 'PYTHONUTF8': '1'},
+        )
+        try:
+            output, error = await asyncio.wait_for(process.communicate(), timeout=7200)
+            if process.returncode:
+                code = re.search(r'HTTP (\d{3})', (output + error).decode(errors='replace'))
+                raise RuntimeError('私有媒体通道失败' + (f'（HTTP {code[1]}）' if code else f'（退出 {process.returncode}）'))
+            if not Path(destination).is_file():
+                raise RuntimeError('私有媒体通道没有生成完整文件')
+        except BaseException:
+            if process.returncode is None:
+                await stop_process(process)
+            for suffix in ('.part', '.part.json'):
+                with contextlib.suppress(OSError):
+                    Path(destination).with_suffix(Path(destination).suffix + suffix).unlink(missing_ok=True)
+            raise
 
     async def tunnel(self, account, session, identity):
         await self.close_tunnel(account)

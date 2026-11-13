@@ -1,7 +1,7 @@
 import { motion } from 'motion/react'
 import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react'
-import { ReactFlow, ReactFlowProvider, Background, MiniMap, SelectionMode, applyNodeChanges, applyEdgeChanges, useReactFlow, type Connection, type Edge, type XYPosition } from '@xyflow/react'
-import { Copy, Hand, Image, ListFilter, Map, Maximize2, MousePointer2, Plus, Redo2, Search, Trash2, Undo2, Upload, X, ZoomIn, ZoomOut } from 'lucide-react'
+import { ReactFlow, ReactFlowProvider, Background, MiniMap, SelectionMode, applyNodeChanges, applyEdgeChanges, useReactFlow, useNodesInitialized, type Connection, type Edge, type XYPosition } from '@xyflow/react'
+import { Copy, Hand, Image, ListFilter, Map, Maximize2, MousePointer2, Plus, Redo2, Search, Sparkles, Trash2, Undo2, Upload, X, ZoomIn, ZoomOut } from 'lucide-react'
 import Card, { CardContext, kindIcons } from './Card'
 import { assetUrl, names, newNode, uid, upload, type Asset, type CanvasData, type CardData, type CreativeNode, type Kind } from './types'
 import NodeDetails from './NodeDetails'
@@ -17,8 +17,14 @@ const nodeKinds: Kind[] = ['text', 'image', 'video', 'upscale', 'upload']
 const descriptions: Partial<Record<Kind, string>> = { text: '脚本、广告词、品牌文案', image: '宣传图、海报、封面', video: '宣传视频、动画、电影', upscale: '图片、视频清晰度增强', upload: '图片、视频、音频，放到画布上' }
 const shortcuts: Partial<Record<Kind, string>> = { text: 'T', image: 'I', video: 'V', upload: 'U' }
 
-function CanvasInner({ canvas, change, fail, generate, addRequest = 0, jobs = [], jobAction, assetRequest }: { canvas: CanvasData; change: (c: CanvasData) => void; fail: (message: string) => void; generate: (id: string|string[]) => void; addRequest?: number; jobs?: Job[]; jobAction: (id:string, operation:'cancel'|'resume')=>void; assetRequest?: (Asset&{requestId:string})|null }) {
+function CanvasInner({ canvas, change, fail, generate, addRequest = 0, jobs = [], jobAction, assetRequest, openAgent, fitRequest = 0 }: { canvas: CanvasData; change: (c: CanvasData) => void; fail: (message: string) => void; generate: (id: string|string[]) => void; addRequest?: number; jobs?: Job[]; jobAction: (id:string, operation:'cancel'|'resume')=>void; assetRequest?: (Asset&{requestId:string})|null; openAgent?:()=>void; fitRequest?:number }) {
   const flow = useReactFlow<CreativeNode>(), wrapper = useRef<HTMLDivElement>(null), file = useRef<HTMLInputElement>(null)
+  const nodesInitialized=useNodesInitialized(), appliedFit=useRef(0)
+  useEffect(()=>{
+    if(!fitRequest||appliedFit.current===fitRequest||!nodesInitialized)return
+    const frame=requestAnimationFrame(()=>{appliedFit.current=fitRequest;void flow.fitView({padding:.2,duration:300})})
+    return()=>cancelAnimationFrame(frame)
+  },[fitRequest,nodesInitialized,flow])
   const [adding, setAdding] = useState<{ x: number; y: number; point?: XYPosition } | null>(null)
   const [menu, setMenu] = useState<{ x: number; y: number; node?: string; point: XYPosition } | null>(null)
   const [minimap, setMinimap] = useState(false), [search, setSearch] = useState<string | null>(null), [hand, setHand] = useState(true)
@@ -152,7 +158,7 @@ function CanvasInner({ canvas, change, fail, generate, addRequest = 0, jobs = []
   keyActions.current = e => {
     if (document.querySelector('[role="dialog"]')) return
     if (e.key === 'Escape') { setAdding(null); setMenu(null); setSearch(null); setPreview(null); return }
-    if ((e.target as HTMLElement).closest('input,textarea,select,[contenteditable="true"]')) return
+    if ((e.target as HTMLElement).closest('input,textarea,select,[contenteditable="true"],.ca-panel')) return
     const ctrl = e.ctrlKey || e.metaKey, key = e.key.toLowerCase()
     if (ctrl && key === 'z') { e.preventDefault(); undo(e.shiftKey); return }
     if (ctrl && key === 'a') { e.preventDefault(); commit({ ...current.current, nodes: current.current.nodes.map(n => ({ ...n, selected: true })) }, false); return }
@@ -186,7 +192,7 @@ function CanvasInner({ canvas, change, fail, generate, addRequest = 0, jobs = []
         <Background color="rgba(255,255,255,.3)" gap={22.4} size={1.12} /><Presence>{minimap && <Surface className="cc-minimap-wrap"><MiniMap position="bottom-left" pannable zoomable nodeColor="#454545" maskColor="#1119" /></Surface>}</Presence>
       </ReactFlow>
     </CardContext.Provider>
-    <div className="cc-canvas-toolbar">{canvas.nodes.some(n=>['image','video','upscale'].includes(n.data.kind))&&<button onClick={()=>{const selected=canvas.nodes.filter(n=>n.selected&&['image','video','upscale'].includes(n.data.kind));const targets=(selected.length?selected:canvas.nodes.filter(n=>['image','video','upscale'].includes(n.data.kind))).map(n=>n.id);generate(targets)}}>生成{canvas.nodes.some(n=>n.selected&&['image','video','upscale'].includes(n.data.kind))?'所选':'全部'}</button>}<button onClick={() => flow.fitView({padding:.3,duration:220})}>原始画布</button><div><button aria-label="节点搜索" onClick={() => setSearch(search === null ? '' : null)}><Search size={17} /></button><button aria-label="适应画布" onClick={() => flow.fitView({padding:.25,duration:200})}><Maximize2 size={17} /></button></div></div>
+    <div className="cc-canvas-toolbar">{openAgent&&<button className="cc-canvas-agent" onClick={openAgent}><Sparkles size={15}/>Agent</button>}{canvas.nodes.some(n=>['image','video','upscale'].includes(n.data.kind))&&<button onClick={()=>{const selected=canvas.nodes.filter(n=>n.selected&&['image','video','upscale'].includes(n.data.kind));const targets=(selected.length?selected:canvas.nodes.filter(n=>['image','video','upscale'].includes(n.data.kind))).map(n=>n.id);generate(targets)}}>生成{canvas.nodes.some(n=>n.selected&&['image','video','upscale'].includes(n.data.kind))?'所选':'全部'}</button>}<button className="cc-toolbar-original" onClick={() => flow.fitView({padding:.3,duration:220})}>原始画布</button><div><button aria-label="节点搜索" onClick={() => setSearch(search === null ? '' : null)}><Search size={17} /></button><button aria-label="适应画布" onClick={() => flow.fitView({padding:.25,duration:200})}><Maximize2 size={17} /></button></div></div>
     {canvas.nodes.length === 0 && <div className="cc-empty-canvas"><div className="cc-empty-icons"><Image size={30} /><kindIcons.video size={30} /><kindIcons.text size={30} /></div><h1>说说你想做的</h1><p>想自己摆？ <kbd>双击</kbd> 或 <kbd>右键</kbd> 画布新建卡片，也可以把文件拖进来</p></div>}
     <div className="cc-canvas-bottom"><div className="cc-navigation"><button title="选择 (Shift 多选)" className={!hand?'active':''} onClick={() => setHand(false)}><MousePointer2 size={18} /></button><button title="移动画布 (Space)" className={hand?'active':''} onClick={() => setHand(true)}><Hand size={18} /></button><i /><button title="撤销 Ctrl+Z" onClick={() => undo()}><Undo2 size={17} /></button><button title="重做 Ctrl+Shift+Z" onClick={() => undo(true)}><Redo2 size={17} /></button></div><button className="cc-add-main" aria-label="添加节点" onClick={() => setAdding(adding ? null : {x:Math.max(12,(wrapper.current?.clientWidth ?? 900)/2-117),y:(wrapper.current?.clientHeight ?? 800)-330})}>{adding ? <X size={22} /> : <Plus size={22} />}</button></div>
     <div className="cc-canvas-corner"><button title="缩小" onClick={() => flow.zoomOut()}><ZoomOut size={16} /></button><span>{Math.round(zoom*100)}%</span><button title="放大" onClick={() => flow.zoomIn()}><ZoomIn size={16} /></button><i /><button aria-label="打开小地图" aria-pressed={minimap} onClick={() => setMinimap(!minimap)}><Map size={17} /></button></div>

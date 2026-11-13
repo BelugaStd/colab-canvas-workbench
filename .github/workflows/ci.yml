@@ -33,7 +33,7 @@ jobs:
       - run: uv run pytest -q
       - run: npm --prefix frontend ci
       - run: npm --prefix frontend run build
-      - run: node --test frontend/tests/versions.test.mjs frontend/tests/upscale.test.mjs frontend/tests/references.test.mjs
+      - run: node --test frontend/tests/versions.test.mjs frontend/tests/upscale.test.mjs frontend/tests/references.test.mjs frontend/tests/agent.test.mjs frontend/tests/agentSync.test.mjs
       - name: Install test browser
         working-directory: frontend
         run: npx playwright install --with-deps chromium

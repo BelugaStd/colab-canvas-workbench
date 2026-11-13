@@ -15,7 +15,7 @@ test('regenerations accumulate immutable settings without replacing the editing 
   jobs[0].creative.node_settings.n.prompt='mutated'
   assert.equal(data(next).versions[0].settings.prompt,'first')
 })
-test('manual output survives polling and save/reload; unseen result becomes output once', () => {
+test('manual output survives polling, save/reload and newly completed results', () => {
   const jobs=[job('a',1,'first'),job('b',2,'second')]
   let next=mergeCompleted(project(),jobs)
   next.canvases[0].nodes[0].data=selectVersion(data(next),data(next).versions[0])
@@ -23,8 +23,13 @@ test('manual output survives polling and save/reload; unseen result becomes outp
   assert.equal(mergeCompleted(next,jobs),next)
   assert.equal(data(next).asset_id,'a')
   next=mergeCompleted(next,[...jobs,job('c',3,'third')])
-  assert.equal(data(next).asset_id,'c')
+  assert.equal(data(next).asset_id,'a')
   assert.equal(data(next).versions.length,3)
+  assert.equal(data(next).version_selection,'manual')
+  data(next).version_selection='auto'
+  next=mergeCompleted(next,[...jobs,job('c',3,'third'),job('d',4,'explicit regeneration')])
+  assert.equal(data(next).asset_id,'d')
+  assert.equal(data(next).version_selection,'auto')
 })
 test('legacy assets are retained and matching historical jobs enrich without duplicating', () => {
   const p=project();Object.assign(data(p),{asset_id:'a',media_type:'image/png'})

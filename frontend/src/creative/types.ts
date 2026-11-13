@@ -12,7 +12,7 @@ export type CardData = Record<string, unknown> & {
   quality?: string; duration?: number; fps?: number; audio?: boolean; mode?: string; image_mode?: string; seed?: number;
   reference_sequence?: number; width?: number; height?: number;
   asset_id?: string; media_type?: string; job_id?: string; pinned?: boolean;
-  versions?: NodeVersion[]; active_version_id?: string;
+  versions?: NodeVersion[]; active_version_id?: string; version_selection?: 'auto' | 'manual';
 }
 export type CreativeNode = Node<CardData, 'creative'>
 export type CanvasData = { id: string; name: string; nodes: CreativeNode[]; edges: Edge[]; viewport: Viewport }
@@ -25,9 +25,13 @@ export const uid = () => crypto.randomUUID()
 export const assetUrl = (id: string) => '/api/assets/' + encodeURIComponent(id) + '/file'
 let csrf = ''
 export function setToken(token: string) { csrf = token }
+export class ApiError extends Error {
+  status: number
+  constructor(message: string, status: number) { super(message); this.name = 'ApiError'; this.status = status }
+}
 export async function api<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
   const response = await fetch('/api' + path, { method, headers: { 'Content-Type': 'application/json', 'X-Workbench-Token': csrf }, body: body === undefined ? undefined : JSON.stringify(body) })
-  if (!response.ok) { const data = await response.json().catch(() => ({})); throw new Error(typeof data.detail === 'string' ? data.detail : '请求失败，请检查输入') }
+  if (!response.ok) { const data = await response.json().catch(() => ({})); throw new ApiError(typeof data.detail === 'string' ? data.detail : '请求失败，请检查输入', response.status) }
   return response.json()
 }
 export async function upload(file: File) {

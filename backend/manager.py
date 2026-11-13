@@ -11,6 +11,7 @@ import aiohttp
 from .colab import clean, transient_connection_error
 from .config import CREATIVE_MODELS, REMOTE_ROOT, ROOT, default_identity
 from .creative_runtime import export_video, register_result, upload_references
+from .file_transfer import remote_path
 from .telemetry import Telemetry
 from .workflows import validate_graph
 
@@ -460,14 +461,25 @@ class Manager:
                     seen.add(signature)
                     name = f"{len(result):02d}-{Path(item['filename']).name}"
                     destination = folder / name
-                    port = self.machine(account)["port"]
-                    async with self.http.get(f"http://127.0.0.1:{port}/view", params=dict(zip(("filename", "subfolder", "type"), signature)), timeout=aiohttp.ClientTimeout(total=600)) as response:
-                        response.raise_for_status()
-                        temp = destination.with_suffix(destination.suffix + ".part")
-                        with temp.open("wb") as stream:
-                            async for chunk in response.content.iter_chunked(1024 * 1024):
-                                stream.write(chunk)
-                        temp.replace(destination)
+                    if not destination.is_file():
+                        remote = remote_path('/'.join((REMOTE_ROOT.lstrip('/'), 'ComfyUI', signature[2],
+                                                     *([signature[1]] if signature[1] else []), signature[0])))
+                        transfer = getattr(self.colab, 'download', None)
+                        if transfer:
+                            try:
+                                await transfer(account, self.machine(account)['session'], remote, destination)
+                            except (RuntimeError, TimeoutError, OSError) as exc:
+                                self.log(account, f'私有媒体下载不可用，使用原 SSH 文件通道：{type(exc).__name__}；{exc}')
+                        if not destination.is_file():
+                            port = self.machine(account)["port"]
+                            async with self.http.get(f"http://127.0.0.1:{port}/view", params=dict(zip(("filename", "subfolder", "type"), signature)),
+                                                     timeout=aiohttp.ClientTimeout(total=7200, sock_connect=20, sock_read=90)) as response:
+                                response.raise_for_status()
+                                temp = destination.with_suffix(destination.suffix + ".part")
+                                with temp.open("wb") as stream:
+                                    async for chunk in response.content.iter_chunked(1024 * 1024):
+                                        stream.write(chunk)
+                                temp.replace(destination)
                     output = {"filename": name, "bytes": destination.stat().st_size, "url": f"/api/jobs/{key}/files/{name}", "comfy_node": node_id}
                     creative_node = creative.get("output_nodes", {}).get(node_id)
                     if creative_node:

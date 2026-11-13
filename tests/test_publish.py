@@ -13,6 +13,7 @@ def test_blocks_private_artifacts_even_when_forced_into_git(path):
 
 
 @pytest.mark.parametrize('payload', [
+    b'sk-' + b'a' * 40,
     b'ya29.' + b'a' * 30,
     b'1/' + b'/' + b'a' * 30,
     b'ghp_' + b'a' * 30,
