@@ -102,6 +102,8 @@ SeedVR2 使用[官方 ComfyUI 集成及独立 CLI](https://github.com/numz/Comfy
 
 ## 数据与依赖
 
+图片素材支持 PNG、JPEG 和 WebP，单文件上传上限为 128MB。上传与生成结果入库记录实际宽高，不设置图片像素总量上限。
+
 正式数据位于 `.data/`，测试数据独立存放。不要删除该目录中的凭证、密钥、SQLite 数据库、assets 或 outputs。Colab 临时盘在释放后清空，下次新建 GPU 会重新下载模型。自动关机需要本地后台和 Colab 连接仍能工作。
 
 部署清单在 `backend/deploy_remote.py`，模型和 ComfyUI 固定到具体修订；Real-ESRGAN 使用官方发布文件与 SHA256 校验。外部登录、下载限速和 Colab 容量变化仍可能影响连接，失败信息会保留在高级面板。

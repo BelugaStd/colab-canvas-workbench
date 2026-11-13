@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse
 from PIL import Image, UnidentifiedImageError
 
 MAX_BYTES = 128 * 1024 * 1024
-Image.MAX_IMAGE_PIXELS = 40_000_000
+Image.MAX_IMAGE_PIXELS = None
 router = APIRouter(prefix="/api/assets")
 
 
@@ -27,8 +27,6 @@ def image_info(path):
         orientation = image.getexif().get(274,1)
         if orientation in {5,6,7,8}:
             width,height = height,width
-        if width * height > 40_000_000:
-            raise ValueError("图片不能超过 4000 万像素")
         ext, media_type = {"PNG": (".png", "image/png"), "JPEG": (".jpg", "image/jpeg"),
                            "WEBP": (".webp", "image/webp")}[image.format]
     with Image.open(path) as validation:
