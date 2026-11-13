@@ -8,7 +8,7 @@ from pathlib import Path
 
 import aiohttp
 
-from .colab import clean
+from .colab import clean, transient_connection_error
 from .config import CREATIVE_MODELS, REMOTE_ROOT, ROOT, default_identity
 from .creative_runtime import export_video, register_result, upload_references
 from .telemetry import Telemetry
@@ -237,7 +237,8 @@ class Manager:
                 raise
             except Exception as exc:
                 message = clean(str(exc)).strip() or type(exc).__name__
-                self.machine(account, phase="error", message=message[-1200:], last_activity=time.time())
+                self.machine(account, phase="error", message=message[-1200:], last_activity=time.time(),
+                             retryable=isinstance(exc, aiohttp.ClientConnectionError) or transient_connection_error(exc))
                 self.log(account, f"启动失败：{type(exc).__name__}: {exc}")
                 # Preserve the owned session so the user can stop it even after partial failure.
                 for job in self.active_jobs(account):
@@ -293,6 +294,20 @@ class Manager:
 
     async def worker(self, account):
         reconnect_attempts = {}
+
+        async def retry_original(job):
+            current = self.job(job['id'])
+            machine = self.machine(account)
+            if (current['status'] not in ACTIVE or not current.get('prompt_id') or not machine.get('session')
+                    or self.closing or account in self.stopping):
+                return False
+            attempts = reconnect_attempts.get(job['id'], 0) + 1
+            reconnect_attempts[job['id']] = attempts
+            delay = min(30, 2 ** min(attempts - 1, 5))
+            self.job(job['id'], status='recovering', message=f'连接暂未恢复，{delay} 秒后重连原 GPU（第 {attempts} 次）；原任务未重复提交')
+            await asyncio.sleep(delay)
+            return True
+
         while not self.closing and account not in self.stopping:
             jobs = self.active_jobs(account)
             if not jobs:
@@ -308,6 +323,8 @@ class Manager:
                     # is needed to identify and release the newly assigned cloud machine.
                     await asyncio.shield(self.start_tasks[account])
                 if self.machine(account)["phase"] != "ready":
+                    if self.machine(account).get('retryable') and await retry_original(job):
+                        continue
                     return
                 if self.job(job["id"])["status"] not in ACTIVE:
                     continue
@@ -322,16 +339,8 @@ class Manager:
                 self.log(account, f"任务 {job['id'][:8]}：{exc}")
                 if recoverable:
                     self.machine(account, phase="disconnected", message="连接中断，正在重连原 GPU")
-                    attempts = reconnect_attempts.get(job['id'], 0) + 1
-                    reconnect_attempts[job['id']] = attempts
-                    if attempts <= 2:
-                        self.job(job['id'], message="连接中断，正在重连原 GPU 并查询原任务")
-                        self.request_start(account, reconnect_only=True)
-                        await asyncio.shield(self.start_tasks[account])
-                        if self.machine(account)['phase'] == 'ready':
-                            continue
-                    elif self.machine(account)['phase'] == 'disconnected':
-                        self.machine(account, message="连接持续中断，请手动重连；原任务未重复提交")
+                    if await retry_original(job):
+                        continue
                     return
             finally:
                 self.inflight_jobs.discard(job["id"])
@@ -478,6 +487,35 @@ class Manager:
             self.job(key,creative=creative)
         return result
 
+    async def prepare_legacy_models(self, account, key, models):
+        if not models or any(model not in CREATIVE_MODELS for model in models):
+            raise ValueError('不支持的模型')
+        session = self.machine(account).get('session')
+        if not session:
+            raise RuntimeError('原 GPU 会话未连接')
+        script = self.store.directory / f'models-{key}-bootstrap.py'
+        source = (
+            'import base64,json,os,subprocess\nfrom pathlib import Path\n'
+            f'root=Path({REMOTE_ROOT!r})\n'
+        )
+        for name in ('deploy_remote.py', 'video_sr_remote.py'):
+            payload = base64.b64encode((ROOT / 'backend' / name).read_bytes()).decode()
+            source += (f'target=root/{name!r}; temporary=root/{(name + "." + key + ".tmp")!r}\n'
+                       f'temporary.write_bytes(base64.b64decode({payload!r})); temporary.replace(target)\n')
+        source += (
+            f'status=root/{("models-" + key + ".json")!r}\n'
+            'if not status.exists():\n'
+            ' status.write_text(json.dumps({"phase":"starting","message":"使用升级后的部署助手准备模型"}))\n'
+            f' with (root/{("models-" + key + ".log")!r}).open("ab") as log:\n'
+            '  subprocess.Popen([str(root/"venv/bin/python"),str(root/"deploy_remote.py"),'
+            f'"--models-only","--models",{",".join(models)!r}],stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,'
+            f'start_new_session=True,env={{**os.environ,"WB_DEPLOY_STATUS":{("models-" + key)!r}}})\n'
+            'print("Model preparation started")\n'
+        )
+        script.write_text(source, encoding='utf8')
+        self.log(account, '旧部署助手不认识此模型，升级下载助手并复用现有 ComfyUI；原任务与 GPU 保留')
+        await self.colab.execute(account, session, script)
+
     async def prepare_models(self, job=None, *, account=None, models=None):
         account, key = (job["account"], job["id"]) if job else (account, uuid.uuid4().hex)
         models = job["creative"]["models"] if job else models
@@ -489,7 +527,11 @@ class Manager:
             async with self.http.request(method, url, json={"models": models} if method == "POST" else None,
                                          timeout=aiohttp.ClientTimeout(total=15)) as response:
                 if 400 <= response.status < 500 and response.status not in {408,429}:
-                    raise ValueError(f'模型准备请求被拒绝（{response.status}）：' + (await response.text())[:500])
+                    text = (await response.text())[:500]
+                    if method == 'POST' and response.status == 400 and 'Invalid model preset' in text:
+                        await self.prepare_legacy_models(account, key, models)
+                        return {'phase': 'starting'}
+                    raise ValueError(f'模型准备请求被拒绝（{response.status}）：' + text)
                 response.raise_for_status()
                 return await response.json()
         deadline = time.monotonic() + 3600

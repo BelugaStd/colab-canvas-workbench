@@ -1,5 +1,6 @@
 import type { Edge } from '@xyflow/react'
 import type { CardData, CanvasData, CreativeNode } from './types'
+import { imageModel } from './imageModels'
 
 export function referencesFor(id: string, canvas: Pick<CanvasData, 'nodes'|'edges'>) {
   let images = 0, texts = 0
@@ -52,7 +53,8 @@ export function referenceIssue(data: CardData, refs: ReturnType<typeof reference
     else if (images.length !== counts[mode]) return `${mode}需要 ${counts[mode]} 张图片，当前 ${images.length} 张`
   }
   if (data.kind === 'image') {
-    const limit = data.model === 'moss-image' ? 4 : 10
+    const limit = imageModel(data.model).maxReferences
+    if(data.model==='qwen-edit'&&images.length<1) return 'Qwen Edit 需要连接 1–3 张图片'
     if (images.length > limit) return `此模型最多支持 ${limit} 张图片`
     const mode = data.image_mode ?? (images.length ? 'edit' : 'text')
     if ((mode === 'text') !== (images.length === 0)) return '图片模式与连线不匹配，请切换模式或调整连线'

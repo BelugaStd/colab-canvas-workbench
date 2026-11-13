@@ -49,9 +49,9 @@ class ModelPreparation:
 
     def start(self, key, models):
         if __package__:
-            from .deploy_remote import MODEL_GROUPS
+            from .deploy_remote import MODEL_GROUPS, models_ready
         else:
-            from deploy_remote import MODEL_GROUPS
+            from deploy_remote import MODEL_GROUPS, models_ready
         allowed = set(MODEL_GROUPS)
         if not isinstance(models, list) or not models or len(models) > len(allowed) or any(type(m) is not str or m not in allowed for m in models):
             raise ValueError("Invalid model preset")
@@ -59,6 +59,10 @@ class ModelPreparation:
             path = self.path(key)
             if path.exists():
                 return self.read(key)
+            if models_ready(self.root, models):
+                result = {'phase': 'ready', 'message': '所需模型已缓存，直接复用', 'time': time.time()}
+                path.write_text(json.dumps(result))
+                return result
             path.write_text(json.dumps({"phase": "starting", "message": "准备所需模型", "time": time.time()}))
             try:
                 with (self.root / f"models-{key}.log").open("ab") as log:

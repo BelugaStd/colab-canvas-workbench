@@ -1,5 +1,24 @@
 # 当前版本验证记录
 
+## 部署提速、Qwen Edit 与断网重连（独立分支）
+
+- 分支 `codex/fast-deploy-qwen-edit`，基于 `9a6c1c2`；保留正式后台与主分支，在独立数据目录、端口和云端会话验证。
+- 默认 4 文件并发下载、共享文件去重、依赖与权重重叠安装、固定版本本地缓存和环境标记复用；SeedVR2 安装使用独立槽位，下载数量仍受文件并发上限限制。云端仅安装 ComfyUI API 所需依赖，复用 Colab 系统 PyTorch/CUDA。
+- 真机发现不限制 Xet 高性能并发会出现 CDN 429，已添加有界流量与逐文件退避续传；确定 403 不重试，空文件不发布就绪清单。相关回归均先失败后通过。未以模拟线程测试的倍率推算整体部署提速。
+- 独立 RTX PRO 6000 真机：Qwen 三文件约 30.1GB，下载阶段 114.76 秒；从提交到 ComfyUI 就绪约 153 秒，含首次 1024×1024 出图约 235 秒。红杯按中文指令改为蓝色，杯柄、CUP 文字、桌面和背景保留。该次冷部署与旧版没有同环境对照，网络、Colab 镜像及全模型集大小仍影响时长。
+- API 模式实际推理通过；云端未安装 frontend/templates/docs 三个 UI 包，保留本地画布。首次试用 uv 时发现其重复拉取系统 Torch/CUDA，最终改用目标 venv 的 pip 复用系统包，避免该额外流量。
+- 已复现首次重连失败即退出、超过两次中断便停止重试，以及新版 SSH session limit HTTP 429 不匹配的问题。5 项恢复回归通过：持续退避、保留原 prompt/session、没有重复提交/申请、停止与取消可结束等待。旧 sidecar 不认识新模型的路径也验证不重启 ComfyUI 或 GPU。
+- 后端完整 149 项通过，包含视频超分安装完成后仍保持下载并发上限的回归；Ruff 通过。前端 Node 15 项、Playwright 12 项和 TypeScript/Vite 构建通过。隔离生产构建的实际浏览器复查了 Qwen 模型、1MP、引用和节点版本详情；浏览器使用模拟算力，不作为真实画质证据。
+- Qwen 的 1/2/3 图原生 Plus 条件和顺序、0/4 图拒绝有后端测试；浏览器检查无输入禁止生成、模型设置刷新保存、依赖生成及版本记录。真实双图颜色参考出图通过；该样本保留主体、桌面和背景，但放大了 CUP 文字并添加了一个 C 字符，说明多图文字细节仍需预览确认，不能承诺像素级保真。真实三图也完成：杯子按第二图改为绿色，并添加第三图黄色星形；原有文字出现变形，属于已观察到的模型能力限制。
+
+
+- 在独立真机三图任务中注入 3 次传输中断及 1 次首次重连失败，原任务仍完成并取回结果。该批 2 个任务只 POST 2 次、只申请 1 台 GPU，重连沿用同一会话；不将模拟传输中断表述为真实拔网线实验。
+- 同一真机的缓存模型准备实测约 1.8–2.5 秒，健康会话重连约 9.5 秒。另一次冷部署约 4.3 分钟，说明网络和并行运行的工作负载会使冷启动波动；这批双图首次出图约 341 秒，三图含连续断联恢复约 109 秒。
+- 本轮包含失败重试的账号额度差约 4.09 CU，也包含同期原服务消耗，不能视作独立测试的精确账单。所有测试自有 VM 已释放；没有重启正式后台、合并主分支或操作正式任务。
+
+官方来源：[Qwen Image Edit 2511](https://huggingface.co/Qwen/Qwen-Image-Edit-2511)、[ComfyUI 教程](https://docs.comfy.org/tutorials/image/qwen/qwen-image-edit-2511)、[官方 INT8 工作流](https://github.com/Comfy-Org/workflow_templates/blob/main/templates/image_qwen_image_edit_2511_int8.json)、[HF 下载与缓存](https://huggingface.co/docs/huggingface_hub/en/guides/download)、[Xet 并发参数](https://github.com/huggingface/xet-core/blob/main/xet_runtime/src/config/groups/client.rs)。模型与 ComfyUI 的确切修订固定在源码中。
+
+
 2026-11-13。真实账号标识、余额台账、会话和输出仅保存在本机测试目录，不进入源码发布。
 
 ## 正式模式复查（最新）

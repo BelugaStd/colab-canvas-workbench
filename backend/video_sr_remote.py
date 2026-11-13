@@ -23,10 +23,11 @@ MODEL_PRESETS = {
 VAE_FILE = 'ema_vae_fp16.safetensors'
 
 
-def prepare_runtime(status):
+def prepare_runtime(status, installer=None):
     code = ROOT / 'SeedVR2'
     marker = ROOT / 'video-sr-ready'
-    if marker.exists() and marker.read_text() == CODE_REVISION:
+    python = ROOT / 'video-sr-venv/bin/python'
+    if marker.exists() and marker.read_text() == CODE_REVISION and python.is_file():
         return
     status('installing', '配置 SeedVR2 视频超分环境')
     code.mkdir(parents=True, exist_ok=True)
@@ -35,11 +36,13 @@ def prepare_runtime(status):
         subprocess.run(['git', '-C', str(code), 'remote', 'add', 'origin', CODE_REPOSITORY], check=True)
     subprocess.run(['git', '-C', str(code), 'fetch', '--depth', '1', 'origin', CODE_REVISION], check=True)
     subprocess.run(['git', '-C', str(code), 'checkout', '--detach', CODE_REVISION], check=True)
-    python = ROOT / 'video-sr-venv/bin/python'
     if not python.exists():
         import sys
         subprocess.run([sys.executable, '-m', 'venv', '--without-pip', '--system-site-packages', str(python.parents[1])], check=True)
-    subprocess.run([str(python), '-m', 'pip', 'install', '--no-cache-dir', '-r', str(code / 'requirements.txt')], check=True)
+    if installer:
+        installer(python, code / 'requirements.txt')
+    else:
+        subprocess.run([str(python), '-m', 'pip', 'install', '--cache-dir', str(ROOT / 'package-cache'), '-r', str(code / 'requirements.txt')], check=True)
     marker.write_text(CODE_REVISION)
 
 

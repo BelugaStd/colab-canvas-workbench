@@ -13,7 +13,7 @@ MODEL_FILES = [
     "vae/minimax_h3_video_vae_int8_convrot.safetensors",
     "vae/minimax_h3_audio_vae_fp32.safetensors",
 ]
-CREATIVE_MODELS = ["minimax-h3", "minimax-h3-reference", "minimax-image", "moss-image", "moss-edit", "upscale",
+CREATIVE_MODELS = ["minimax-h3", "minimax-h3-reference", "minimax-image", "moss-image", "moss-edit", "qwen-edit", "upscale",
                    "seedvr2-7b", "seedvr2-7b-sharp", "seedvr2-3b"]
 
 

@@ -10,6 +10,7 @@ import { Presence, Surface, transition } from './Motion'
 import '@xyflow/react/dist/style.css'
 import type { Job } from '../types'
 import { attachReference, normalizeReferences, referencesFor, setReferenceRole, videoMode } from './references'
+import { imageModel } from './imageModels'
 
 const nodeTypes = { creative: Card }
 const nodeKinds: Kind[] = ['text', 'image', 'video', 'upscale', 'upload']
@@ -122,7 +123,7 @@ function CanvasInner({ canvas, change, fail, generate, addRequest = 0, jobs = []
     const count = referencesFor(target.id, next).filter(r=>r.node.data.kind!=='text').length
     if (target.data.kind === 'video' && count > (target.data.mode==='参考图'?9:2)) return fail('首尾帧最多两张图片；使用多张主体参考请先选择参考图模式')
     if (target.data.kind === 'video' && target.data.mode==='首尾循环' && count>1) return fail('首尾循环使用一张相同的首尾图片')
-    if (target.data.kind === 'image' && count > (target.data.model==='moss-image'?4:10)) return fail('已达到此模型的参考图片上限')
+    if (target.data.kind === 'image' && count > imageModel(target.data.model).maxReferences) return fail('已达到此模型的参考图片上限')
     commit(next)
   }
   async function uploadFiles(files: FileList | File[], point = center()) {

@@ -52,6 +52,8 @@ def reference_plan(nodes, edges, key):
             for i, source in enumerate(images):
                 roles[source] = 'last' if i else 'first'
     elif data['kind'] == 'image':
+        if data.get('model') == 'qwen-edit' and not 1 <= len(images) <= 3:
+            raise ValueError('Qwen Edit 需要连接 1–3 张图片；文生图请选择 MiniMax 或 MOSS')
         if any(roles[s] in {'first', 'last'} for s in images):
             raise ValueError('图片生成请将输入用途设为主图或参考图')
         if sum(roles[s] == 'base' for s in images) > 1:
@@ -95,7 +97,7 @@ def resolve_prompt(nodes, key, plan):
                 result = expand(nodes[source].get('prompt', '').strip(), (*stack, source))
             else:
                 number = plan['images'].index(source) + 1
-                result = f'Picture {number}' if nodes[key].get('model') == 'moss-image' else f'<Picture {number}>'
+                result = f'Picture {number}' if nodes[key].get('model') in {'moss-image', 'qwen-edit'} else f'<Picture {number}>'
             replacements.append(result)
             return f'\x00{len(replacements)-1}\x00'
         escaped = value.replace('@@', '\x01')
@@ -114,7 +116,7 @@ def resolve_prompt(nodes, key, plan):
     if not prompt.strip() and nodes[key]['kind'] != 'upscale':
         raise ValueError(f"请先填写「{nodes[key]['label']}」的提示词或连接文本节点")
     if nodes[key]['kind'] == 'image' and plan['images'] and nodes[key].get('image_mode'):
-        picture = 'Picture 1' if nodes[key].get('model') == 'moss-image' else '<Picture 1>'
+        picture = 'Picture 1' if nodes[key].get('model') in {'moss-image', 'qwen-edit'} else '<Picture 1>'
         if plan['mode'] == 'edit':
             prompt = f'Edit {picture}. {prompt.strip()}\nPreserve the original visual medium and style, all content, identity, composition and background not explicitly requested to change. 保持原图的绘画或摄影类型、视觉风格，以及未要求修改的内容不变。'
         elif plan['mode'] == 'reference':

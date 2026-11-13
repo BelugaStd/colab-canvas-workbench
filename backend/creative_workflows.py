@@ -22,7 +22,7 @@ def dimensions(data, video=False, source_size=None):
         ratio = ASPECTS[aspect]
     if not .25 <= ratio <= 4:
         raise ValueError('源图片画幅过窄或过宽，请选择 1:1、16:9 等输出画幅')
-    resolution = data.get("resolution", "768p" if video else "1MP" if data.get('model') == 'moss-image' else "2K")
+    resolution = data.get("resolution", "768p" if video else "1MP" if data.get('model') in {'moss-image', 'qwen-edit'} else "2K")
     if video:
         if resolution not in {"512p", "768p"}:
             raise ValueError("H3 视频仅提供推荐范围内的 512p / 768p")
@@ -42,6 +42,10 @@ def dimensions(data, video=False, source_size=None):
         if resolution not in areas:
             raise ValueError('MOSS 图片分辨率可选 1MP / 1.5MP / 2MP')
         area = areas[resolution] * 1024**2
+    elif data.get('model') == 'qwen-edit':
+        if resolution != '1MP':
+            raise ValueError('Qwen Edit 使用推荐的 1MP 分辨率')
+        area = 1024**2
     elif resolution not in {"1K", "2K"}:
         raise ValueError("图片分辨率须为 1K 或 2K")
     else:
@@ -159,8 +163,21 @@ def compile_canvas(canvas, target_id, asset_info=None):
                         positive = add("CLIPTextEncode", clip=clip, text=prompt)
                         negative = add("CLIPTextEncode", clip=clip, text=negative_prompt)
                         steps, cfg, sampler, scheduler = 25, 2.5, "er_sde", "simple"
+                elif model == 'qwen-edit':
+                    models.add('qwen-edit')
+                    unet = add('UNETLoader', unet_name='qwen_image_edit_2511_int8_convrot.safetensors', weight_dtype='default')
+                    unet = add('ModelSamplingAuraFlow', model=unet, shift=3.1)
+                    unet = add('CFGNorm', model=unet, strength=1.0)
+                    clip = add('CLIPLoader', clip_name='qwen_2.5_vl_7b_fp8_scaled.safetensors', type='qwen_image', device='default')
+                    vae = add('VAELoader', vae_name='qwen_image_vae.safetensors')
+                    main_image = add('ImageScale', image=references[0], upscale_method='lanczos', width=width, height=height, crop='center')
+                    ref_inputs = {f'image{i+1}': ref for i, ref in enumerate([main_image, *references[1:]])}
+                    positive = add('TextEncodeQwenImageEditPlus', clip=clip, vae=vae, prompt=prompt, **ref_inputs)
+                    negative = add('TextEncodeQwenImageEditPlus', clip=clip, vae=vae, prompt='', **ref_inputs)
+                    latent = add('VAEEncode', pixels=main_image, vae=vae)
+                    steps, cfg, sampler, scheduler = 40, 4.0, 'euler', 'simple'
                 else:
-                    raise ValueError("图片模型只支持 MiniMax Image / MOSS Image")
+                    raise ValueError("图片模型只支持 MiniMax Image / MOSS Image / Qwen Edit")
                 sampled = add("KSampler", model=unet, positive=positive, negative=negative, latent_image=latent,
                               seed=seed, steps=steps, cfg=cfg, sampler_name=sampler, scheduler=scheduler, denoise=1.0)
                 result = add("VAEDecode", samples=sampled, vae=vae)

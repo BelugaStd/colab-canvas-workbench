@@ -43,6 +43,16 @@ def clean(text):
     return text[-14000:]
 
 
+def transient_connection_error(exc):
+    if isinstance(exc, (TimeoutError, OSError)):
+        return True
+    text = str(exc).lower()
+    return any(word in text for word in ('sslerror', 'connectionerror', 'connection was lost',
+        'connection reset', 'connection refused', 'network is', 'timed out', 'timeout',
+        'http 429', 'http 502', 'http 503', 'http 504', 'already-active ssh session',
+        'ssh session limit reached', 'ssh 端口转发未就绪', '通道尚未恢复'))
+
+
 class Colab:
     def __init__(self, profiles, directory):
         self.profiles = {p["id"]: p for p in profiles}
@@ -169,7 +179,7 @@ class Colab:
                 log.seek(offset)
                 error = clean(log.read().decode(errors="replace"))
             # WARN: A stale SSH lease must only retry the same runtime, never allocate a replacement.
-            if "Already-active SSH session" in error and attempt < 4:
+            if any(word in error.lower() for word in ('already-active ssh session', 'ssh session limit reached', 'http 429')) and attempt < 4:
                 await asyncio.sleep(2 ** (attempt + 1))
                 continue
             raise RuntimeError(error or "SSH 端口转发未就绪；保留原 GPU 会话，请重试连接")
