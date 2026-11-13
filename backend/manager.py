@@ -520,10 +520,10 @@ class Manager:
         await self.colab.execute(account, session, script)
 
     async def ensure_image_runtime(self, account):
-        from .minimax_full_remote import NODE
+        from .minimax_full_remote import NODE, runtime_ready
 
         async with self.image_runtime_locks[account]:
-            if NODE in await self.remote(account, 'GET', '/object_info/' + NODE):
+            if runtime_ready(await self.remote(account, 'GET', '/object_info/' + NODE)):
                 return
             deadline = time.monotonic() + 3600
             while True:
@@ -543,9 +543,9 @@ class Manager:
                 source += f'(root/{name!r}).write_bytes(base64.b64decode({payload!r}))\n'
             source += "subprocess.run([str(root/'venv/bin/python'),str(root/'minimax_full_remote.py')],check=True,timeout=240)\n"
             script.write_text(source, encoding='utf-8')
-            self.log(account, '启用官方全量 BF16 加载器；仅更新空闲 ComfyUI，保留原 GPU 与模型文件')
+            self.log(account, '更新模型驻留策略；仅更新空闲 ComfyUI，保留原 GPU 与磁盘模型缓存')
             await self.colab.execute(account, session, script)
-            if NODE not in await self.remote(account, 'GET', '/object_info/' + NODE):
+            if not runtime_ready(await self.remote(account, 'GET', '/object_info/' + NODE)):
                 raise RuntimeError('MiniMax 全量加载器未就绪，请检查服务器日志')
 
     async def prepare_models(self, job=None, *, account=None, models=None):
@@ -583,8 +583,7 @@ class Manager:
             if status.get("phase") == "error":
                 raise RuntimeError(status.get("message", "模型准备失败"))
             if status.get("phase") == "ready":
-                if 'minimax-image-full' in models:
-                    await self.ensure_image_runtime(account)
+                await self.ensure_image_runtime(account)
                 return
             if job:
                 self.job(key, message=status.get("message", "准备所需模型"))

@@ -172,7 +172,8 @@ def test_runtime_upgrade_refuses_to_restart_a_busy_comfy(monkeypatch, tmp_path):
     assert not calls
 
 
-async def test_existing_gpu_installs_missing_loader_once_and_reuses_it(tmp_path, monkeypatch):
+@pytest.mark.parametrize('old_runtime', ['missing-loader', 'old-memory-policy'])
+async def test_existing_gpu_installs_missing_loader_once_and_reuses_it(tmp_path, monkeypatch, old_runtime):
     from backend.manager import Manager
     from backend.store import Store
     from tests.fake_colab import PROFILES, FakeColab
@@ -183,7 +184,8 @@ async def test_existing_gpu_installs_missing_loader_once_and_reuses_it(tmp_path,
     try:
         await manager.start('colab2')
         original = manager.machine('colab2').copy()
-        fake.full_loader_ready = False
+        fake.full_loader_ready = old_runtime != 'missing-loader'
+        fake.runtime_description = ''
         installs = []
         async def execute(account, session, script):
             assert session == original['session']
@@ -192,6 +194,7 @@ async def test_existing_gpu_installs_missing_loader_once_and_reuses_it(tmp_path,
             installs.append(session)
             await asyncio.sleep(.05)
             fake.full_loader_ready = True
+            fake.runtime_description = minimax_full_remote.RUNTIME_DESCRIPTION
             return 'ready'
         monkeypatch.setattr(fake, 'execute', execute)
         await asyncio.gather(manager.ensure_image_runtime('colab2'), manager.ensure_image_runtime('colab2'))

@@ -340,6 +340,8 @@ def download_and_serve(prepare=True):
             '--front-end-root', str(frontend), '--disable-partner-nodes',
             "--use-pytorch-cross-attention",
             "--preview-method", "none",
+            # NOTE: The upstream 128 GiB inactive headroom evicts reusable large models between workflows.
+            '--cache-ram', '10', '10',
         ], cwd=COMFY, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     (ROOT / "server.pid").write_text(str(proc.pid))
     for _ in range(180):

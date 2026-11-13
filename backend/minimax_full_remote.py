@@ -16,6 +16,11 @@ FILES = [f'transformer/model-{i:05d}-of-00012.safetensors' for i in range(1, 13)
     'transformer/model.safetensors.index.json', 'pdd_fused_heads.safetensors', 'pdd_config.json',
 ]
 NODE = 'WorkbenchMiniMaxImageFullLoader'
+RUNTIME_DESCRIPTION = 'Official full BF16 loader; workbench memory policy v1'
+
+
+def runtime_ready(info):
+    return info.get(NODE, {}).get('description') == RUNTIME_DESCRIPTION
 
 
 def load_full_state(directory, read_tensors):
@@ -90,6 +95,8 @@ def load_model():
 
 
 class MiniMaxImageFullLoader:
+    DESCRIPTION = RUNTIME_DESCRIPTION
+
     @classmethod
     def INPUT_TYPES(cls):
         return {'required': {}}
@@ -112,7 +119,7 @@ def remote_json(path):
 
 
 def ensure_runtime():
-    if NODE in remote_json('/object_info/' + NODE):
+    if runtime_ready(remote_json('/object_info/' + NODE)):
         return
     queue = remote_json('/queue')
     # WARN: Installing this loader must never interrupt an existing ComfyUI job.
@@ -134,7 +141,7 @@ def ensure_runtime():
     else:
         raise TimeoutError('等待原 ComfyUI 正常退出超时')
     subprocess.run([str(ROOT / 'venv/bin/python'), str(ROOT / 'deploy_remote.py'), '--serve'], check=True, timeout=180)
-    if NODE not in remote_json('/object_info/' + NODE):
+    if not runtime_ready(remote_json('/object_info/' + NODE)):
         raise RuntimeError('全量图片加载器未就绪，请检查 ComfyUI 日志')
 
 

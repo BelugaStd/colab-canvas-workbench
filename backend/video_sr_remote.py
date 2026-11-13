@@ -1,5 +1,6 @@
 """Pinned SeedVR2 runtime and the single trusted ComfyUI video SR node."""
 import json
+import logging
 import math
 import os
 import signal
@@ -21,6 +22,10 @@ MODEL_PRESETS = {
     'seedvr2-3b': 'seedvr2_ema_3b_fp16.safetensors',
 }
 VAE_FILE = 'ema_vae_fp16.safetensors'
+
+
+class VideoSROutOfMemory(RuntimeError):
+    pass
 
 
 def prepare_runtime(status, installer=None):
@@ -97,7 +102,10 @@ def run_inference(arguments, log_path, interrupted):
                     raise TimeoutError('视频超分运行超过两小时')
                 time.sleep(.5)
             if process.returncode:
-                raise RuntimeError('SeedVR2 视频超分失败：' + log_path.read_text(errors='replace')[-3500:])
+                output = log_path.read_text(errors='replace')
+                error = VideoSROutOfMemory if any(message in output.lower() for message in (
+                    'cuda out of memory', 'cuda error: out of memory')) else RuntimeError
+                raise error('SeedVR2 视频超分失败：' + output[-3500:])
         finally:
             if process.poll() is None:
                 # WARN: Interrupt the entire CLI process group so cancellation releases its GPU workers.
@@ -107,6 +115,25 @@ def run_inference(arguments, log_path, interrupted):
                 except subprocess.TimeoutExpired:
                     os.killpg(process.pid, signal.SIGKILL)
                     process.wait()
+
+
+def run_with_memory_budget(arguments, log_path, memory, required=32 * 2**30, destination=None):
+    # NOTE: The separate SeedVR2 process cannot ask ComfyUI to offload weights as its demand grows.
+    for attempt, budget in enumerate((required, 1e30)):
+        memory.throw_exception_if_processing_interrupted()
+        memory.free_memory(budget, memory.get_torch_device())
+        memory.soft_empty_cache()
+        try:
+            run_inference(arguments, log_path, memory.throw_exception_if_processing_interrupted)
+            return
+        except VideoSROutOfMemory:
+            if attempt:
+                raise
+            logging.warning('视频超分显存不足，释放其余驻留模型后重试一次；磁盘权重保留，生成参数不变')
+            if log_path.exists():
+                log_path.replace(log_path.with_suffix('.oom.log'))
+            if destination:
+                destination.unlink(missing_ok=True)
 
 
 def finish_video(enhanced, source, destination, info, size):
@@ -148,10 +175,8 @@ class WorkbenchVideoUpscale:
                 size = output_dimensions(info['width'], info['height'], scale)
                 if size[0] <= info['width'] and size[1] <= info['height']:
                     raise ValueError('输入视频已达到 4K 上限，无需继续放大')
-                model_management.unload_all_models()
-                model_management.soft_empty_cache()
-                run_inference(cli_arguments(source, enhanced, model, *size), directory / 'inference.log',
-                              model_management.throw_exception_if_processing_interrupted)
+                run_with_memory_budget(cli_arguments(source, enhanced, model, *size), directory / 'inference.log',
+                                       model_management, destination=enhanced)
                 model_management.throw_exception_if_processing_interrupted()
                 if not enhanced.is_file():
                     raise RuntimeError('SeedVR2 没有输出成片')

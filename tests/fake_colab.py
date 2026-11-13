@@ -8,6 +8,7 @@ from aiohttp import web
 from PIL import Image
 
 from backend.config import ROOT
+from backend.minimax_full_remote import RUNTIME_DESCRIPTION
 
 PROFILES = [{"id": f"colab{i}", "label": f"账号 {i}", "launcher": "/test/fake", "installed": True, "credential_present": True} for i in (1, 2, 3)]
 
@@ -29,6 +30,7 @@ class FakeColab:
         self.telemetry_ports = {}
         self.metric_offset = 0
         self.full_loader_ready = True
+        self.runtime_description = RUNTIME_DESCRIPTION
 
     async def sessions(self, account):
         self.calls.append((account, "sessions"))
@@ -86,7 +88,7 @@ class FakeColab:
         @routes.get('/object_info/{node}')
         async def object_info(request):
             name = request.match_info['node']
-            return web.json_response({name: {}} if self.full_loader_ready else {})
+            return web.json_response({name: {'description': self.runtime_description}} if self.full_loader_ready else {})
 
         @routes.get('/ws')
         async def websocket(request):
