@@ -15,8 +15,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 if __package__:
-    from . import video_sr_remote
+    from . import minimax_full_remote, video_sr_remote
 else:
+    import minimax_full_remote
     import video_sr_remote
 
 ROOT = Path("/content/colab-workbench")
@@ -41,6 +42,11 @@ MODEL_GROUPS = {
         ("Comfy-Org/MiniMax-H3-Image", IMAGE_REVISION, "diffusion_models/minimax_h3_image_pruned_int8_convrot.safetensors"),
         ("Comfy-Org/MiniMax-H3-Image", IMAGE_REVISION, "vae/minimax_h3_image_vae_fp16.safetensors"),
         ("Comfy-Org/MiniMax-H3", REVISION, FILES[1]),
+    ],
+    'minimax-image-full': [(minimax_full_remote.REPOSITORY, minimax_full_remote.REVISION, file)
+                           for file in minimax_full_remote.FILES] + [
+        ('Comfy-Org/MiniMax-H3', REVISION, 'text_encoders/qwen3vl_32b_minimax_h3_bf16.safetensors'),
+        ('Comfy-Org/MiniMax-H3-Image', IMAGE_REVISION, 'vae/minimax_h3_image_vae_fp16.safetensors'),
     ],
     "moss-image": [("Comfy-Org/MOSS-Image", MOSS_REVISION, file) for file in (
         "diffusion_models/moss_image_sft_int8_convrot.safetensors",
@@ -69,6 +75,8 @@ def selected_models():
 
 
 def model_destination(repo, filename):
+    if repo == minimax_full_remote.REPOSITORY:
+        return 'minimax-image-full/' + filename
     return 'SEEDVR2/' + filename if repo == video_sr_remote.WEIGHTS_REPOSITORY else filename.removeprefix('split_files/')
 
 
@@ -318,6 +326,9 @@ def download_and_serve(prepare=True):
     node = COMFY / "custom_nodes/workbench_video_sr/__init__.py"
     node.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(Path(video_sr_remote.__file__), node)
+    image_node = COMFY / 'custom_nodes/workbench_minimax_full/__init__.py'
+    image_node.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(Path(minimax_full_remote.__file__), image_node)
     status("starting", "启动 ComfyUI，检查模型加载器")
     frontend = ROOT / 'api-frontend'
     frontend.mkdir(exist_ok=True)
@@ -325,7 +336,7 @@ def download_and_serve(prepare=True):
     with (ROOT / "server.log").open("ab") as log:
         proc = subprocess.Popen([
             sys.executable, str(COMFY / "main.py"), "--listen", "127.0.0.1", "--port", "8188",
-            "--disable-auto-launch", "--disable-all-custom-nodes", "--whitelist-custom-nodes", "workbench_video_sr",
+            "--disable-auto-launch", "--disable-all-custom-nodes", "--whitelist-custom-nodes", "workbench_video_sr", 'workbench_minimax_full',
             '--front-end-root', str(frontend), '--disable-partner-nodes',
             "--use-pytorch-cross-attention",
             "--preview-method", "none",

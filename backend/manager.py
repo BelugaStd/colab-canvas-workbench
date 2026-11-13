@@ -30,6 +30,7 @@ class Manager:
         self.maintenance = None
         self.closing = False
         self.refresh_locks = {p["id"]: asyncio.Lock() for p in profiles}
+        self.image_runtime_locks = {p['id']: asyncio.Lock() for p in profiles}
         if not store.get("settings", "main"):
             store.put("settings", "main", {"identity": default_identity(), "idle_minutes": 15, "stop_on_exit": True})
         if not store.get("meta", "install"):
@@ -93,11 +94,11 @@ class Manager:
                 try:
                     await self.remote(account, "GET", "/system_stats")
                     if full:
-                        self.machine(account, phase="deploying", message="检查全部创作模型")
-                        await self.prepare_models(account=account, models=CREATIVE_MODELS)
+                        self.machine(account, phase="deploying", message="准备官方全量 MiniMax Image；其它模型按需准备")
+                        await self.prepare_models(account=account, models=['minimax-image-full'])
                         if account in self.stopping:
                             return
-                        self.machine(account, phase="ready", message="全部模型已就绪", last_activity=time.time())
+                        self.machine(account, phase="ready", message="MiniMax Image 全量模型已就绪，其它模型首次使用时自动准备", last_activity=time.time())
                     self.ensure_worker(account)
                     return
                 except Exception as exc:
@@ -140,7 +141,7 @@ class Manager:
                     else:
                         if full:
                             self.machine(account, message="原 GPU 已重连，检查所需模型")
-                            await self.prepare_models(account=account, models=CREATIVE_MODELS)
+                            await self.prepare_models(account=account, models=['minimax-image-full'])
                         if account in self.stopping:
                             return
                         self.machine(account, phase="ready", message="原 GPU 已重连，环境与任务已保留", stats=stats, last_activity=time.time())
@@ -163,10 +164,11 @@ class Manager:
                 deploy = (ROOT / "backend/deploy_remote.py").read_bytes()
                 telemetry = (ROOT / "backend/telemetry_remote.py").read_bytes()
                 video_sr = (ROOT / "backend/video_sr_remote.py").read_bytes()
+                minimax_full = (ROOT / 'backend/minimax_full_remote.py').read_bytes()
                 queued = self.active_jobs(account)
                 initial_models = queued[0].get("creative", {}).get("models", ["minimax-h3"]) if queued else ["minimax-h3"]
                 if full:
-                    initial_models = CREATIVE_MODELS
+                    initial_models = ['minimax-image-full']
                 bootstrap = self.store.directory / f"{account}-bootstrap.py"
                 bootstrap.write_text(
                     "import base64, subprocess, sys\nfrom pathlib import Path\n"
@@ -174,6 +176,7 @@ class Manager:
                     f"(root/'deploy_remote.py').write_bytes(base64.b64decode({base64.b64encode(deploy).decode()!r}))\n"
                     f"(root/'telemetry_remote.py').write_bytes(base64.b64decode({base64.b64encode(telemetry).decode()!r}))\n"
                     f"(root/'video_sr_remote.py').write_bytes(base64.b64decode({base64.b64encode(video_sr).decode()!r}))\n"
+                    f"(root/'minimax_full_remote.py').write_bytes(base64.b64decode({base64.b64encode(minimax_full).decode()!r}))\n"
                     "with (root/'telemetry.log').open('ab') as log:\n"
                     " subprocess.Popen([sys.executable,str(root/'telemetry_remote.py')],stdout=log,stderr=subprocess.STDOUT,start_new_session=True)\n"
                     "with (root/'deploy.log').open('ab') as log:\n"
@@ -202,7 +205,7 @@ class Manager:
                     try:
                         stats = await self.remote(account, "GET", "/system_stats", timeout=5)
                         if full:
-                            await self.prepare_models(account=account, models=CREATIVE_MODELS)
+                            await self.prepare_models(account=account, models=['minimax-image-full'])
                             if account in self.stopping:
                                 return
                         self.machine(account, phase="ready", message="GPU 已就绪", stats=stats, last_activity=time.time())
@@ -498,7 +501,7 @@ class Manager:
             'import base64,json,os,subprocess\nfrom pathlib import Path\n'
             f'root=Path({REMOTE_ROOT!r})\n'
         )
-        for name in ('deploy_remote.py', 'video_sr_remote.py'):
+        for name in ('deploy_remote.py', 'video_sr_remote.py', 'minimax_full_remote.py'):
             payload = base64.b64encode((ROOT / 'backend' / name).read_bytes()).decode()
             source += (f'target=root/{name!r}; temporary=root/{(name + "." + key + ".tmp")!r}\n'
                        f'temporary.write_bytes(base64.b64decode({payload!r})); temporary.replace(target)\n')
@@ -515,6 +518,35 @@ class Manager:
         script.write_text(source, encoding='utf8')
         self.log(account, '旧部署助手不认识此模型，升级下载助手并复用现有 ComfyUI；原任务与 GPU 保留')
         await self.colab.execute(account, session, script)
+
+    async def ensure_image_runtime(self, account):
+        from .minimax_full_remote import NODE
+
+        async with self.image_runtime_locks[account]:
+            if NODE in await self.remote(account, 'GET', '/object_info/' + NODE):
+                return
+            deadline = time.monotonic() + 3600
+            while True:
+                queue = await self.remote(account, 'GET', '/queue')
+                if not queue.get('queue_running') and not queue.get('queue_pending'):
+                    break
+                if time.monotonic() >= deadline or account in self.stopping or self.closing:
+                    raise RuntimeError('当前任务未结束，暂未更新全量图片加载器')
+                await asyncio.sleep(3)
+            session = self.machine(account).get('session')
+            if not session or account in self.stopping or self.closing:
+                raise RuntimeError('原 GPU 已断开或正在停止，无法启用全量图片模型')
+            script = self.store.directory / f'{account}-minimax-full-runtime.py'
+            source = f'import base64,subprocess\nfrom pathlib import Path\nroot=Path({REMOTE_ROOT!r})\n'
+            for name in ('deploy_remote.py', 'video_sr_remote.py', 'minimax_full_remote.py'):
+                payload = base64.b64encode((ROOT / 'backend' / name).read_bytes()).decode()
+                source += f'(root/{name!r}).write_bytes(base64.b64decode({payload!r}))\n'
+            source += "subprocess.run([str(root/'venv/bin/python'),str(root/'minimax_full_remote.py')],check=True,timeout=240)\n"
+            script.write_text(source, encoding='utf-8')
+            self.log(account, '启用官方全量 BF16 加载器；仅更新空闲 ComfyUI，保留原 GPU 与模型文件')
+            await self.colab.execute(account, session, script)
+            if NODE not in await self.remote(account, 'GET', '/object_info/' + NODE):
+                raise RuntimeError('MiniMax 全量加载器未就绪，请检查服务器日志')
 
     async def prepare_models(self, job=None, *, account=None, models=None):
         account, key = (job["account"], job["id"]) if job else (account, uuid.uuid4().hex)
@@ -551,6 +583,8 @@ class Manager:
             if status.get("phase") == "error":
                 raise RuntimeError(status.get("message", "模型准备失败"))
             if status.get("phase") == "ready":
+                if 'minimax-image-full' in models:
+                    await self.ensure_image_runtime(account)
                 return
             if job:
                 self.job(key, message=status.get("message", "准备所需模型"))

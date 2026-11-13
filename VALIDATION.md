@@ -1,5 +1,19 @@
 # 当前版本验证记录
 
+## 官方全量 MiniMax Image 与原生 4K（2026-11-13）
+
+- 独立分支 `codex/fast-deploy-qwen-edit`。DiT 使用 MiniMaxAI 固定修订的 12 个原始分片，保留 50 层、完整时间嵌入和 AdaLN；官方精度为 BF16 / 部分 FP32，没有官方全量 FP16 发布包。BF16 文本编码器及 FP16 VAE 使用 Comfy-Org 兼容格式，首次权重约 119GB。
+- 真实验收发现并修正原始逐头交错 Q/K/V 与 ComfyUI 分组布局不兼容（包括两个 token refiner 层）、六个 PDD 完整头与基准头加差值布局不兼容，以及 FP32 时间嵌入必须在 SiLU 后再转 BF16 的精度顺序。原始注意力行与 Comfy-Org 字节区间比对确认排列；测试覆盖行边界、全部行恰好保留一次、原始精度、PDD 重建及块/最终层调制。此前噪声样本均未作为画质通过证据。
+- 独立 RTX PRO 6000 实测：原生 4096×4096 文生图得到蓝色陶瓷杯、白色星形、右侧杯柄和木桌；把该成片作为参考，原生 4096×4096 编辑为红杯，杯形、星形、构图、桌面及背景保持相关。已打开两张实际输出对照，标准质量无自动超分或降为 2K；不将该样本表述为任意编辑均像素保真。
+- 修复后复用权重缓存、重启 ComfyUI，首张从提交到本地保存约 527.45 秒（含首次模型初始化），随后参考编辑约 55.71 秒。本轮 17 个权重文件的下载阶段另测约 366.13 秒；这些阶段来自不同尝试，不合并冒称为一次完整冷启动实测。网络、画幅、引用数量及设备会影响耗时。
+- 4K 按约 16MP 面积计算：方图 4096×4096、16:9 为 5472×3072，按 32 网格对齐；文生图和图像参考的尺寸均有编译回归。MOSS、Qwen 不开放 4K。MiniMax 官方有效范围约 4–20MP、推荐约 16MP，界面已纠正固定版本旧节点的约 4MP 提示。
+- 全预设去重约 264GB，超过常见 G4 约 253GB 磁盘；一键连接先准备全量图片模型，视频、MOSS、Qwen 和超分首次使用时自动准备。旧 GPU 缺少加载节点时等待队列空闲，再只更新确认身份的 ComfyUI 进程，保留 GPU 与下载缓存；并发升级与忙时拒绝回归通过。
+- 最终后端完整 169 项、Node 辅助逻辑 15 项、Playwright 浏览器 13 项通过；Ruff、TypeScript/Vite 构建及发布检查通过。正式 8765 使用真实驱动和新构建，4K / BF16 提示、参数刷新持久化、高级面板按需模型说明与控制台零错误复查通过。另补齐 favicon，消除正式浏览器发现的图标 404。
+- 正式模式更新前确认没有活动任务、原 GPU 已关闭；备份数据库，核对原项目、素材、草稿、元数据及会话哈希，恢复原闲置和退出设置。验证项目仅移入回收站，原用户项目未编辑。正式服务保持运行。
+- 包含失败重试的账号额度差约 15.89 CU，包含同期原正式 GPU 的消费，不能视为独立测试的精确账单。测试自有 GPU 已释放，CLI 确认该测试会话消失，账号当时活动分配及计费速率为 0；凭据、余额台账、模型与真实媒体仅在本机忽略目录保存。
+
+来源：[MiniMax 官方原始权重及精度说明](https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/5f90473023975e6271b0ed1dd84c4e88e4bbc6d3/README.md)、[Diffusers QKV 原始排列转换](https://github.com/huggingface/diffusers/blob/main/scripts/convert_minimax_h3_to_diffusers.py)、[Diffusers 原始混合精度顺序](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/transformers/transformer_minimax_h3_image.py)、[固定 ComfyUI PDD 布局](https://github.com/Comfy-Org/ComfyUI/blob/4d64a8bc072b81c9b47321789b4d83fb7348ae2a/comfy/ldm/minimax/model.py#L370)。
+
 ## 部署提速、Qwen Edit 与断网重连（独立分支）
 
 - 分支 `codex/fast-deploy-qwen-edit`，基于 `9a6c1c2`；保留正式后台与主分支，在独立数据目录、端口和云端会话验证。

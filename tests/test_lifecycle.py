@@ -251,7 +251,7 @@ async def test_same_gpu_jobs_are_serial_and_different_accounts_run_in_parallel(r
     await manager.cancel(c['id'])
 
 
-async def test_connect_all_waits_for_full_model_preparation(rig, monkeypatch):
+async def test_connect_prepares_full_precision_image_and_leaves_other_weights_on_demand(rig, monkeypatch):
     manager, _, _ = rig
     seen = []
     async def prepare(job=None, **kwargs):
@@ -259,8 +259,7 @@ async def test_connect_all_waits_for_full_model_preparation(rig, monkeypatch):
     monkeypatch.setattr(manager, 'prepare_models', prepare)
     await manager.start('colab2', full=True)
     assert manager.machine('colab2')['phase'] == 'ready'
-    assert set(seen[-1]) == {'minimax-h3', 'minimax-h3-reference', 'minimax-image', 'moss-image', 'moss-edit', 'qwen-edit', 'upscale',
-                             'seedvr2-7b', 'seedvr2-7b-sharp', 'seedvr2-3b'}
+    assert seen[-1] == ['minimax-image-full']
 
 
 async def test_stale_usage_refresh_cannot_forget_a_newly_allocated_session(rig, monkeypatch):

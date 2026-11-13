@@ -30,7 +30,7 @@ Windows 双击项目根目录或 outputs 中的「启动工作台.cmd」，打�
 ## 从登录到生成
 
 1. 打开或新建项目，点击左下角算力小窗。
-2. 选择已登录账号，点击「连接服务器」。程序自动申请或复用本工作台的 GPU，安装固定版本 ComfyUI，下载全部创作模型，建立 SSH 与监控连接。首次下载需要等待；界面显示就绪后可直接生成。
+2. 选择已登录账号，点击「连接服务器」。程序自动申请或复用本工作台的 GPU，安装固定版本 ComfyUI，准备官方全量 MiniMax Image，建立 SSH 与监控连接。视频、Qwen、MOSS 和超分模型首次使用时自动准备；直接提交任务时优先部署该任务实际需要的模型。首次下载需要等待；就绪后即可生成。
 3. 双击或右键画布添加图片、视频、文本、超分节点，也可拖入文件。I / V / T / U 分别创建图片、视频、文本或上传素材。
 4. 把上游右端连接点拖到下游左端。选中下游，输入提示词，用 @ 选择已经连接的素材。每条连线有稳定的「@图N / @文本N」编号，重命名节点不会改变编号。所有连入图片都会参与生成；@ 用来描述各图用途，不是开启参考的开关。连入文本自动加入提示词。
 5. 选中节点展开提示词和设置。点击节点箭头生成，或使用右上角「生成所选 / 全部」。结果取回本地后出现在对应节点和素材库。
@@ -41,13 +41,17 @@ Windows 双击项目根目录或 outputs 中的「启动工作台.cmd」，打�
 | 节点 | 模型 | 提供的设置 |
 | --- | --- | --- |
 | 视频 | MiniMax H3 INT8 ConvRot，普通 20 步；主体参考使用独立 REF2VA 权重 | 5–15 秒、24/30 fps、声音、六种画幅或跟随主图、512p/768p、五种参考模式 |
-| 图片 | MiniMax Image、普通 MOSS Image SFT / Edit LoRA、Qwen Image Edit 2511 INT8 ConvRot | 六种画幅或跟随主图、模型对应分辨率、标准/精细；Qwen 专用于 1–3 图编辑/参考创作 |
+| 图片 | 官方原始 MiniMax Image 全量 BF16、普通 MOSS Image SFT / Edit LoRA、Qwen Image Edit 2511 INT8 ConvRot | 六种画幅或跟随主图、模型对应分辨率、标准/精细；Qwen 专用于 1–3 图编辑/参考创作 |
 | 图片超分 | 官方 Real-ESRGAN x4plus | 2× / 4× |
 | 视频超分 | SeedVR2 7B 自然 / 7B Sharp 细节 / 3B 均衡（均为 FP16） | 2× / 4×，保持比例，最高 4K 像素预算 |
 
 H3 生成尺寸限制在官方推荐的 1344×768 像素预算内，按官方 32 像素网格对齐。模型原生生成 24 fps，30 fps 为导出重采样。导出保留音频、精确时长；循环模式用首尾同图条件及短过渡降低接缝，不能保证所有提示词都产生完全无感的动作循环。
 
-MiniMax Image 的 1K/2K 按约 1M/4M 像素面积计算，默认 2K；1K 适合快速预览，画质较低。MOSS 可选 1/1.5/2MP，旧项目的 1K/2K 分别映射 1/2MP。具体宽高随画幅变化；默认跟随主图，无参考时图片为 1:1、视频为 16:9。精细质量在生成后使用 Real-ESRGAN 增强，再回到所选尺寸。
+MiniMax Image 使用 [MiniMaxAI 原始全量权重](https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/tree/5f90473023975e6271b0ed1dd84c4e88e4bbc6d3/transformer)：50 层 DiT 约 66.3GB，保留完整时间嵌入及 AdaLN 投影，不使用 `pruned`、INT8 或 FP4 DiT。官方发布的精度是 **BF16，部分层 FP32**，本项目保留该精度；文本编码器改用 Comfy-Org 的 BF16 条件编码格式（约 51.5GB），VAE 为其官方 FP16 打包。首次需约 119GB，原始分片直接加载，不再复制合并出另一份大权重。加载时按 [Diffusers 官方转换契约](https://github.com/huggingface/diffusers/blob/main/scripts/convert_minimax_h3_to_diffusers.py)将原始逐头交错的 Q/K/V 无损重排为 ComfyUI 的分组布局（包括两个 token refiner 层），将官方六个完整 PDD 输出头转换为 [ComfyUI 的基准头＋差值布局](https://github.com/Comfy-Org/ComfyUI/blob/4d64a8bc072b81c9b47321789b4d83fb7348ae2a/comfy/ldm/minimax/model.py#L370)，并按原始混合精度顺序保留 FP32 时间嵌入至 SiLU 激活之后，再转为 BF16 做 AdaLN 投影。
+
+MiniMax Image 的 1K/2K/4K 按约 1M/4M/16M 像素面积计算，默认 2K；1K 仅用于快速预览。原生 4K 方图 4096×4096，16:9 为 5472×3072，标准质量不会自动超分或降回 2K。[MiniMax 官方说明](https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/5f90473023975e6271b0ed1dd84c4e88e4bbc6d3/README.md#sizes)给出的有效范围约 4–20MP，推荐约 16MP；固定 ComfyUI 节点中较早的 2048×2048 提示不再作为模型上限。显存和耗时仍随画幅、参考数量及 GPU 变化。MOSS 可选 1/1.5/2MP，旧项目的 1K/2K 分别映射 1/2MP。具体宽高随画幅变化；默认跟随主图，无参考时图片为 1:1、视频为 16:9。精细质量在原生生成后使用 Real-ESRGAN 增强，再回到所选尺寸。
+
+所有预设权重合计约 264GB，超过常见 G4 的 253GB 磁盘，因此不再一次预下载全部模型。其它模型按需自动准备；空间不足会明确报错，不会静默退回量化模型。旧 GPU 首次启用全量图片模型时，如缺少分片加载节点，会在原有 ComfyUI 队列清空后更新该进程；保留 Colab GPU 会话与下载缓存，后续连接直接复用。
 
 Qwen Edit 使用官方 2511 INT8 ConvRot、Qwen 2.5 VL 文本编码器及 Qwen Image VAE，三文件共约 30.1GB。连接 1–3 张图片，第一张为主图，按 @图编号描述其它图片的用途；不提供无图片的文生图。输出采用推荐 1MP、40 步、CFG 4；跟随主图保留画幅，自选画幅会居中裁切主图。参数和确切输入仍保存为节点版本，可编辑后重新生成。该预设沿用本项目的 Blackwell / CUDA 13 要求。
 

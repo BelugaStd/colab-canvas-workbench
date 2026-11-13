@@ -28,6 +28,7 @@ class FakeColab:
         self.native_busy = False
         self.telemetry_ports = {}
         self.metric_offset = 0
+        self.full_loader_ready = True
 
     async def sessions(self, account):
         self.calls.append((account, "sessions"))
@@ -81,6 +82,11 @@ class FakeColab:
         @routes.get('/system_stats')
         async def stats(request):
             return web.json_response({"devices": [{"name": "测试 GPU（模拟）", "vram_total": 96 * 2**30}]})
+
+        @routes.get('/object_info/{node}')
+        async def object_info(request):
+            name = request.match_info['node']
+            return web.json_response({name: {}} if self.full_loader_ready else {})
 
         @routes.get('/ws')
         async def websocket(request):

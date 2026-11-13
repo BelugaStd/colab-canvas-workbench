@@ -46,10 +46,10 @@ def dimensions(data, video=False, source_size=None):
         if resolution != '1MP':
             raise ValueError('Qwen Edit 使用推荐的 1MP 分辨率')
         area = 1024**2
-    elif resolution not in {"1K", "2K"}:
-        raise ValueError("图片分辨率须为 1K 或 2K")
+    elif resolution not in {"1K", "2K", "4K"}:
+        raise ValueError("MiniMax 图片分辨率可选 1K / 2K / 4K")
     else:
-        area = 1024**2 if resolution == "1K" else 2048**2
+        area = {"1K": 1024**2, "2K": 2048**2, "4K": 4096**2}[resolution]
     multiple = 16 if data.get('model') == 'moss-image' else 32
     return round(math.sqrt(area * ratio) / multiple) * multiple, round(math.sqrt(area / ratio) / multiple) * multiple
 
@@ -130,9 +130,9 @@ def compile_canvas(canvas, target_id, asset_info=None):
                 if model == "minimax-image":
                     if len(references) > 10:
                         raise ValueError("MiniMax Image 最多使用 10 张参考图")
-                    models.add("minimax-image")
-                    unet = add("UNETLoader", unet_name="minimax_h3_image_pruned_int8_convrot.safetensors", weight_dtype="default")
-                    clip = add("CLIPLoader", clip_name="qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", type="minimax", device="default")
+                    models.add("minimax-image-full")
+                    unet = add('WorkbenchMiniMaxImageFullLoader')
+                    clip = add("CLIPLoader", clip_name="qwen3vl_32b_minimax_h3_bf16.safetensors", type="minimax", device="default")
                     vae = add("VAELoader", vae_name="minimax_h3_image_vae_fp16.safetensors")
                     positive = add("MiniMaxH3ImageConditioning", clip=clip, vae=vae, prompt=prompt, width=width, height=height,
                                    **{f"images.image_{i}": ref for i, ref in enumerate(references)})
