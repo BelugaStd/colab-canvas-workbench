@@ -2,12 +2,14 @@ import asyncio
 import base64
 import contextlib
 import json
+import math
 import time
 import uuid
 from pathlib import Path
 
 import aiohttp
 
+from . import production
 from .colab import clean, transient_connection_error
 from .config import CREATIVE_MODELS, REMOTE_ROOT, ROOT, default_identity
 from .creative_runtime import export_video, register_result, upload_references
@@ -16,6 +18,9 @@ from .telemetry import Telemetry
 from .workflows import validate_graph
 
 ACTIVE = {"pending", "preparing", "submitting", "queued", "running", "downloading", "recovering"}
+BUDGET_POLL_SECONDS = 30
+BUDGET_REFRESH_TIMEOUT_SECONDS = 10
+BUDGET_QUOTA_OUTAGE_SECONDS = 120
 
 
 class Manager:
@@ -66,11 +71,28 @@ class Manager:
     def active_jobs(self, account):
         return sorted((j for j in self.store.all("jobs") if j["account"] == account and j["status"] in ACTIVE), key=lambda j: j["created_at"])
 
+    def active_speech(self, account):
+        session = self.machine(account).get('session')
+        return [item for item in self.store.all('agent_speech_tasks') if item.get('account') == account
+                and item.get('session') == session and item.get('status') in {'pending', 'running', 'downloading', 'interrupted'}]
+
     async def refresh(self, account):
         async with self.refresh_locks[account]:
             before = self.machine(account)
             usage, sessions = await asyncio.gather(self.colab.usage(account), self.colab.sessions(account))
-            self.store.put("accounts", account, {"usage": usage, "sessions": sessions, "checked_at": time.time(), "error": None})
+            if self.store.get('production_budgets', account):
+                balance = usage.get('balance')
+                if type(balance) not in (int, float) or not math.isfinite(balance) or balance < 0:
+                    raise ValueError('预算额度接口没有返回有效余额')
+            sampled_at = time.time()
+            self.store.put("accounts", account, {"usage": usage, "sessions": sessions,
+                "checked_at": sampled_at, "usage_checked_at": sampled_at, "error": None})
+            ledger = self.store.get('production_budgets', account)
+            if ledger:
+                ledger.pop('quota_error', None)
+                ledger.pop('quota_failure_since', None)
+                self.store.put('production_budgets', account, ledger)
+                production.budget(self.store, account)
             machine = self.machine(account)
             # Never mark a pending allocation stopped; it may not yet appear in sessions.
             pending = {"checking", "provisioning", "deploying", "stopping"}
@@ -82,6 +104,7 @@ class Manager:
             return self.store.get("accounts", account)
 
     def request_start(self, account, full=False, reconnect_only=False):
+        production.guard_budget(self.store, account)
         if account in self.stopping:
             raise ValueError("机器正在停止，请稍候")
         if account not in self.start_tasks or self.start_tasks[account].done():
@@ -272,8 +295,11 @@ class Manager:
     def submit(self, account, graph, name, stop_after, creative=None):
         validate_graph(graph)
         self.machine(account)
+        production.guard_budget(self.store, account)
         if account in self.stopping:
             raise ValueError("账号的机器正在停止")
+        if self.active_speech(account):
+            raise ValueError('原 GPU 配音尚未确认结束，请先通过 Agent 查看服务器状态或恢复原配音任务')
         if len(self.active_jobs(account)) >= 20:
             raise ValueError("每个账号最多排队 20 个任务")
         if any(j.get("stop_after") for j in self.active_jobs(account)):
@@ -625,6 +651,8 @@ class Manager:
         self.machine(account)
         if self.active_jobs(account) and not force:
             raise ValueError("还有未完成任务，请先取消任务再关闭机器")
+        if self.active_speech(account) and not force:
+            raise ValueError('原 GPU 仍有未确认结束的配音，不能在本地取消等待后直接关闭')
         if account not in self.stop_tasks or self.stop_tasks[account].done():
             self.stopping.add(account)
             self.machine(account, message="等待释放云端机器")
@@ -655,11 +683,18 @@ class Manager:
                     self.job(job["id"], status="cancelled", message="机器已关闭", ended_at=time.time())
                 self.machine(account, phase="stopped", session=None, port=None, message="机器已释放，停止计费")
                 self.log(account, f"已释放 {session}")
+                ledger = self.store.get('production_budgets', account, {})
+                if ledger.get('shutdown_session') == session:
+                    self.store.patch('production_budgets', account, shutdown_status='confirmed',
+                        shutdown_confirmed_at=time.time(), shutdown_error=None)
                 with contextlib.suppress(Exception):
                     await self.refresh(account)
             except Exception as exc:
                 self.machine(account, phase="error", message="关机未确认：" + clean(str(exc)))
                 self.log(account, f"关机失败：{exc}")
+                ledger = self.store.get('production_budgets', account, {})
+                if ledger.get('shutdown_session') == session:
+                    self.store.patch('production_budgets', account, shutdown_status='unknown', shutdown_error=clean(str(exc)))
             finally:
                 self.stopping.discard(account)
 
@@ -667,7 +702,8 @@ class Manager:
         minutes = self.store.get("settings", "main")["idle_minutes"]
         for machine in self.store.all("machines"):
             account = machine["account"]
-            if machine["phase"] not in {"ready", "error"} or not machine.get("session") or self.active_jobs(account):
+            if (machine["phase"] not in {"ready", "error"} or not machine.get("session")
+                    or self.active_jobs(account) or self.active_speech(account)):
                 continue
             if machine["phase"] == "ready":
                 try:
@@ -682,9 +718,62 @@ class Manager:
                 self.log(account, f"空闲 {minutes} 分钟，自动关闭")
                 self.request_stop(account)
 
+    async def budget_sweep(self):
+        for machine in self.store.all('machines'):
+            account, session = machine['account'], machine.get('session')
+            ledger = self.store.get('production_budgets', account)
+            if not ledger or not session or account in self.stopping:
+                continue
+            install = self.store.get('meta', 'install')['id']
+            if not session.startswith(f'wb-{install}-{account[-1]}-'):
+                continue
+            now = time.time()
+            if now - ledger.get('last_quota_attempt_at', 0) < BUDGET_POLL_SECONDS:
+                continue
+            production.budget(self.store, account)
+            self.store.patch('production_budgets', account, last_quota_attempt_at=now)
+            try:
+                await asyncio.wait_for(self.refresh(account), BUDGET_REFRESH_TIMEOUT_SECONDS)
+                value = production.budget(self.store, account)
+                if value['quota_status'] != 'fresh':
+                    raise ValueError('额度接口没有返回有效余额或采样时间')
+            except Exception as exc:
+                ledger = self.store.get('production_budgets', account)
+                since = ledger.get('quota_failure_since', ledger.get('last_usage_checked_at', now))
+                error = clean(str(exc)).strip() or type(exc).__name__
+                self.store.patch('production_budgets', account, quota_failure_since=since, quota_error=error)
+                self.log(account, '预算额度未知，禁止新增推理：' + error)
+                value = production.budget(self.store, account)
+            machine = self.machine(account)
+            if machine.get('session') != session:
+                continue
+            ledger = self.store.get('production_budgets', account)
+            outage = now - ledger.get('quota_failure_since', now)
+            exhausted = value['remaining_cu'] <= 5 or (value['estimated_remaining_cu'] is not None and value['estimated_remaining_cu'] <= 5)
+            if not exhausted and (value['quota_status'] == 'fresh' or outage < BUDGET_QUOTA_OUTAGE_SECONDS):
+                continue
+            reason = '预算已到 5 CU 预留底线' if exhausted else '预算额度持续失联超过 120 秒'
+            self.store.patch('production_budgets', account, shutdown_status='requested', shutdown_session=session,
+                shutdown_reason=reason, shutdown_requested_at=now, shutdown_error=None)
+            self.log(account, reason + '，强制释放本工作台 GPU；网络中断时停止可能无法确认')
+            # WARN: A stalled deployment must release the account lock before budget shutdown can run.
+            tasks = [self.workers.get(account)]
+            if machine['phase'] != 'provisioning':
+                tasks.append(self.start_tasks.get(account))
+            for task in tasks:
+                if task and not task.done():
+                    task.cancel()
+            self.request_stop(account, force=True)
+
     async def maintain(self):
         while True:
             await asyncio.sleep(15)
+            try:
+                await self.budget_sweep()
+            except Exception as exc:
+                for profile in self.profiles:
+                    if self.store.get('production_budgets', profile['id']):
+                        self.log(profile['id'], '预算维护失败，停机尚未确认：' + str(exc))
             await self.idle_sweep()
 
     async def close(self):

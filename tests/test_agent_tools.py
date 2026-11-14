@@ -46,7 +46,8 @@ def create(key, kind='image', **data):
 def test_tools_have_stable_unique_names_and_closed_schemas():
     assert [tool['name'] for tool in TOOLS] == ['inspect_canvas', 'inspect_assets', 'edit_canvas',
         'save_story', 'generate_nodes', 'get_jobs', 'cancel_job', 'resume_job', 'server',
-        'extract_frame', 'assemble_film', 'manage_project']
+        'extract_frame', 'assemble_film', 'manage_project', 'save_production', 'lock_asset_version',
+        'review_media', 'synthesize_speech', 'mix_sound']
     assert all(tool['parameters']['additionalProperties'] is False for tool in TOOLS)
 
 

@@ -263,6 +263,15 @@ async def save_project(key: str, body: ProjectSave, request: Request):
         raise HTTPException(409, "项目已在另一个窗口更新，请重新打开后再编辑")
     validate_folder(request, body.folder_id, key)
     validate_canvases(body.canvases)
+    from .production import guard_locks
+    incoming = {canvas['id']: canvas for canvas in body.canvases}
+    for canvas in old.get('canvases', []):
+        if canvas.get('production', {}).get('locks'):
+            guard_locks(canvas, incoming.get(canvas['id'], {'nodes': []}))
+            old_locks = canvas['production']['locks']
+            new_locks = incoming[canvas['id']].get('production', {}).get('locks', [])
+            if any(lock not in new_locks for lock in old_locks):
+                raise ValueError('已发布资产版本不能从制作台账删除或修改')
     if body.kind == "folder" and body.canvases:
         raise ValueError("文件夹不能包含画布")
     if body.kind == "project" and not body.canvases:

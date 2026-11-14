@@ -42,6 +42,8 @@ Provider contracts are grounded in [OpenAI function calling](https://developers.
 
 ## 模块与工具
 
+长篇短剧的制作台账、固定资产版本、独立审片与对白调度见 [专业剧集制作与验收](agent-production.md)。
+
 | 模块 | 职责 |
 | --- | --- |
 | `backend/agent_prompts.py` | 版本化导演规则、模型约束与创作质量 |
@@ -104,4 +106,4 @@ API 沿用工作台访问令牌。
 
 ## One-minute film acceptance
 
-Original story, 60-second timeline, one identity anchor and style bible, individual 5–15s H3 shots with approved first/end stills, fixed costume/props and deliberate limited camera motion. All stills return to the original anchor. Validate actual output frames and reference fidelity before committing remaining GPU budget. Assemble ordered clips deterministically; verify exact duration/fps/codec/audio and inspect contact sheets. Preserve editable graph, prompts, versions and final media node. Track gross account CU difference with a 100-CU cap; release only owned test sessions, keep local service running.
+Original story, 60-second timeline, one identity anchor and style bible, individual 5–15s H3 shots with approved first/end stills, fixed costume/props and deliberate limited camera motion. All stills return to the original anchor. Validate actual output frames and reference fidelity before committing remaining GPU budget. Assemble ordered clips deterministically; verify exact duration/fps/codec/audio and inspect contact sheets. Preserve editable graph, prompts, versions and final media node. Track gross account CU difference with a 100-CU cap. Keep this test GPU and local services running after delivery as requested; the budget guard may stop only the owned test session before exceeding the authorized cap.

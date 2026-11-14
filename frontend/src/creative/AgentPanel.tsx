@@ -6,6 +6,7 @@ import { api, assetUrl, names, uid, type CanvasData, type CreativeNode, type Pro
 import { DraftInput, DraftTextarea } from './DraftText'
 import GlassSelect from './GlassSelect'
 import AgentMarkdown from './AgentMarkdown'
+import ProductionLedger from './ProductionLedger'
 import { Presence, Reveal, Surface, transition } from './Motion'
 import { agentBusyStatuses, agentRunLabels, agentTurns, cachePercentage, insertAgentMention, toolText, updateSessionRun,
   type AgentEvent, type AgentMode, type AgentRun, type AgentSession, type AgentSessionSummary, type AgentSettings, type AgentUsage } from './agentTypes'
@@ -27,6 +28,8 @@ const toolNames: Record<string, string> = {
   get_jobs: '查看生成进度', wait_jobs: '等待成片', inspect_media: '检查画面', extract_frame: '提取视频帧',
   compose_video: '合成影片', assemble_video: '合成影片', select_version: '选择输出版本',
   get_server: '查看服务器', get_compute: '查看算力', prepare_models: '准备模型',
+  save_production: '保存制作台账', lock_asset_version: '锁定素材版本', review_media: '审查媒体',
+  synthesize_speech: '生成对白', mix_sound: '混合声音',
 }
 const toolLabel = (name?: string) => name ? toolNames[name] ?? name.replaceAll('_', ' ') : '执行工具'
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : '连接暂时不可用，请重试'
@@ -360,6 +363,7 @@ export default function AgentPanel(props: Props) {
       </Surface>}</Presence>
       <Presence>{showSettings && <SettingsForm key="settings" close={() => setShowSettings(false)} onSaved={setSettings}/>}</Presence>
       <div className="ca-conversation" ref={scroll} onScroll={() => { const box = scroll.current; if (box) follow.current = box.scrollHeight - box.scrollTop - box.clientHeight < 90 }}><div className="ca-conversation-content" ref={scrollContent}>
+        <ProductionLedger key={canvas.id} canvas={canvas}/>
         <Presence>{loading && <Surface className="ca-loading" role="status"><LoaderCircle size={16} className="ca-spin"/>读取对话…</Surface>}</Presence>
         {!loading && !turns.length && <Surface className="ca-welcome"><span className="ca-welcome-mark"><Sparkles size={25}/></span><h2>把想法，变成一段故事</h2><p>一起构思、打磨提示词，或让我在画布上搭好完整工作流。</p>
           <div className="ca-suggestions">{[

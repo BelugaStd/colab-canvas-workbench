@@ -275,3 +275,67 @@ test('autosave rebases on a concurrent Agent revision instead of overwriting its
   await page.locator('.react-flow__node').filter({ has: page.getByTestId('card-image') }).click()
   await expect(prompt).toHaveValue('Manual change during Agent run')
 })
+
+test('the read-only production ledger shows exact locks, ordered shots and continuity without hiding the composer', async ({ page }) => {
+  await page.setViewportSize({ width: 916, height: 524 })
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  await mockAgent(page)
+  await page.goto('/')
+  await page.getByRole('button', { name: '新建项目', exact: true }).first().click()
+  await expect(page.locator('.cc-canvas')).toBeVisible()
+  const id = new URL(page.url()).hash.replace('#project=', '')
+  let production: any = {
+    revision: 3, brief: { title: '灯塔最后一班', target_seconds: 15, conflict: '机器人必须决定把最后一块电池留给自己还是灯塔。', arc: '从独自求生到为归航者点亮灯塔。' },
+    entities: [{ id: 'robot', kind: 'character', name: '黄铜机器人', description: '旧黄铜外壳，左眼为蓝色光圈。' }, { id: 'tower', kind: 'location', name: '海边灯塔', description: '白色圆塔、红色铁门，雨夜。' }],
+    scenes: [{ id: 'scene-1', name: '灯塔门前', location_id: 'tower', axis: '机器人在画左、塔门在画右。', lighting: '冷蓝雨夜与门内暖光。' }],
+    locks: [{ id: 'robot-v2', entity_id: 'robot', label: '机器人最终定稿', asset_id: 'ledger-reference', node_id: 'locked-robot-v2', continuity: { eye: '蓝色' }, created_at: 1 }],
+    shots: [
+      { id: 'shot-1', node_id: 'video-1', image_node_id: 'image-1', end_image_node_id: 'image-2', scene_id: 'scene-1', duration: 5, source_duration: 10, start: 2, purpose: '发现最后一块电池', action: '机器人摊开手掌，照亮电池。', entities: ['robot'], bindings: ['robot-v2'],
+        camera: { size: '近景', lens_mm: 50, movement: '缓缓推近', motivation: '突出仅剩的能源与抉择。', axis: '保持门在画右', eyeline: '机器人看向掌中电池' },
+        state_in: { battery: '手中', door: '关闭' }, state_out: { battery: '手中', door: '打开' }, dialogue: [{ speaker: 'robot', text: '总得有人，照亮回家的路。' }] },
+      { id: 'shot-2', node_id: 'video-2', image_node_id: 'image-3', scene_id: 'scene-1', duration: 10, purpose: '作出选择', action: '机器人走入灯塔。', entities: ['robot'], bindings: ['robot-v2'],
+        camera: { size: '全景', lens_mm: 35, movement: '固定', motivation: '让角色的选择在空间中完成。', axis: '保持门在画右', eyeline: '向塔内' }, state_in: { door: '打开' }, state_out: { door: '打开' } },
+    ],
+  }
+  await page.route(`**/api/projects/${id}`, async route => {
+    if (route.request().method() !== 'GET') { await route.continue(); return }
+    const response = await route.fetch(), project = await response.json()
+    project.canvases[0].production = production
+    await route.fulfill({ response, json: project })
+  })
+  await page.route('**/api/assets/ledger-reference/file', route => route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="#887150"/></svg>' }))
+  await page.reload()
+  await page.locator('.cc-canvas-agent').click()
+  const panel = page.getByRole('complementary', { name: '创作 Agent', exact: true }), ledger = panel.getByRole('region', { name: '制作台账', exact: true })
+  await expect(ledger).toContainText('2 镜 · 15秒')
+  await ledger.locator('.cp-ledger-heading').click()
+  await expect(ledger.getByText('灯塔最后一班', { exact: true })).toBeVisible()
+  await expect(ledger.locator('.cp-shot-heading strong')).toHaveText(['发现最后一块电池', '作出选择'])
+  await ledger.locator('.cp-shot-heading').first().click()
+  await expect(ledger.locator('.cp-shot-details')).toContainText('50mm')
+  await expect(ledger.locator('.cp-shot-details')).toContainText('突出仅剩的能源与抉择。')
+  await expect(ledger.locator('.cp-trim')).toHaveText('原片 10秒 · 从 2秒 截取 5秒')
+  await expect(ledger.locator('.cp-state').first()).toContainText('入场状态')
+  await expect(ledger.locator('.cp-state').nth(1)).toContainText('打开')
+  await expect(ledger.locator('.cp-bound-version code')).toHaveText('robot-v2')
+  await expect(ledger.locator('.cp-dialogue')).toContainText('总得有人，照亮回家的路。')
+  await ledger.getByRole('tab', { name: '资产 2', exact: true }).click()
+  await expect(ledger.locator('.cp-locked-asset code')).toHaveText('robot-v2')
+  await expect(ledger.getByRole('img', { name: '黄铜机器人 robot-v2', exact: true })).toBeVisible()
+  await ledger.getByRole('tab', { name: '资产 2', exact: true }).press('ArrowRight')
+  await expect(ledger.getByRole('tab', { name: '场次 1', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await expect(ledger.locator('.cp-scene')).toContainText('冷蓝雨夜与门内暖光。')
+  await expect(ledger.locator('input,textarea,select,[contenteditable=true]')).toHaveCount(0)
+  await expect.poll(() => panel.evaluate(element => [...element.querySelectorAll('.ca-composer textarea,.ca-composer-toolbar>button')].every(control => {
+    const box = control.getBoundingClientRect(), hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2)
+    return box.y >= 0 && box.bottom <= innerHeight && !!hit && control.contains(hit)
+  }))).toBe(true)
+  await panel.getByLabel('向 Agent 描述创作需求', { exact: true }).fill('请把第二个镜头改为缓慢后拉，保留锁定人物。')
+  await page.screenshot({ path: '../outputs/agent-production-ledger.png', fullPage: true })
+  production = { revision: 1, brief: production.brief }
+  await page.reload(); await page.locator('.cc-canvas-agent').click()
+  await ledger.locator('.cp-ledger-heading').click()
+  await expect(ledger).toContainText('镜头尚在策划中')
+  expect(errors).toEqual([])
+})

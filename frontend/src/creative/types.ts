@@ -15,7 +15,20 @@ export type CardData = Record<string, unknown> & {
   versions?: NodeVersion[]; active_version_id?: string; version_selection?: 'auto' | 'manual';
 }
 export type CreativeNode = Node<CardData, 'creative'>
-export type CanvasData = { id: string; name: string; nodes: CreativeNode[]; edges: Edge[]; viewport: Viewport }
+export type ProductionEntity = { id: string; kind: 'character' | 'location' | 'prop'; name: string; description: string }
+export type ProductionScene = { id: string; name: string; location_id: string; axis: string; lighting: string }
+export type ProductionLock = { id: string; entity_id: string; label: string; asset_id: string; node_id: string;
+  continuity: Record<string, unknown>; entity_snapshot?: ProductionEntity; created_at: number }
+export type ProductionShot = { id: string; node_id: string; image_node_id: string; end_image_node_id?: string;
+  scene_id: string; duration: number; source_duration?: number; start?: number; transition?: string;
+  purpose: string; action: string; entities: string[]; bindings: string[];
+  camera: { size: string; lens_mm: number; movement: string; motivation: string; axis: string; eyeline: string };
+  state_in: Record<string, unknown>; state_out: Record<string, unknown>;
+  dialogue?: { speaker: string; text: string }[] }
+export type Production = { schema_version?: number; revision: number;
+  brief: { title: string; target_seconds: number; conflict: string; arc: string };
+  entities: ProductionEntity[]; scenes: ProductionScene[]; shots: ProductionShot[]; locks: ProductionLock[] }
+export type CanvasData = { id: string; name: string; nodes: CreativeNode[]; edges: Edge[]; viewport: Viewport; production?: Production }
 export type Project = { id: string; name: string; kind: 'project' | 'folder'; folder_id: string | null;
   revision: number; created_at: number; updated_at: number; deleted_at: number | null; canvases: CanvasData[] }
 export type ProjectSummary = Omit<Project, 'canvases'> & { canvas_count: number; thumbnail_asset?: string; thumbnail_type?:string }

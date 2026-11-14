@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 from fastapi import HTTPException
 
-from . import agent_media
+from . import agent_media, production
 from .assets import asset_path
 from .creative_workflows import ASPECTS, dimensions
 from .manager import ACTIVE
@@ -30,6 +30,7 @@ class ToolContext:
     call_id: str
     mode: str = 'auto'
     approved: bool = False
+    review: object = None
 
 
 class ToolApprovalRequired(Exception):
@@ -114,6 +115,25 @@ TOOLS = [
     {'name': 'manage_project', 'description': 'Rename the current project/canvas or create/duplicate a canvas inside this project. New canvas ID is returned; the current conversation remains scoped to its canvas.',
      'parameters': obj({'action': {'type': 'string', 'enum': ['rename_project', 'rename_canvas', 'create_canvas', 'duplicate_canvas']},
                         'name': string(100), 'expected_revision': REVISION}, ('action', 'name', 'expected_revision'))},
+    {'name': 'save_production', 'description': 'Save a professional episode manifest before expensive work. Required brief={title,target_seconds,conflict,arc}; entities=[{id,kind:character/location/prop,name,description}]; scenes=[{id,name,location_id,axis,lighting}]; ordered shots=[{id,node_id,image_node_id,end_image_node_id?,scene_id,duration,source_duration?:5-15,start?:0,purpose,action,camera:{size,lens_mm,movement,motivation,axis,eyeline},state_in,state_out,entities:[entity_id],bindings:[locked_version_id],dialogue?:[]}]. duration is final edit length; source_duration is H3 generation length, default max(5,duration). Sum edit durations exactly equals target. Changed tracked state requires end_image_node_id; same scene adjacent states agree unless explicit transition. Empty shots allowed during asset development; locks immutable.',
+     'parameters': obj({'expected_revision': REVISION, 'brief': DATA, 'entities': array(DATA, 60), 'scenes': array(DATA, 40),
+                        'shots': array(DATA, 120)}, ('expected_revision',))},
+    {'name': 'lock_asset_version', 'description': 'Publish an exact reviewed character/location/prop image as an immutable version and snapshot reference node. First save the entity, generate and independently review_media purpose=master with entity_id. Returns version ID and stable reference node; future shots bind it explicitly.',
+     'parameters': obj({'expected_revision': REVISION, 'entity_id': ID, 'asset_id': ID, 'label': string(100), 'continuity': DATA},
+                       ('expected_revision', 'entity_id', 'asset_id', 'label'))},
+    {'name': 'review_media', 'description': 'Independent model inspects actual image or video contact sheet against exact production manifest and locked assets. purpose=master needs entity_id; still/shot need shot_id; final checks the film. Records pass/reject for exact output+contract fingerprint. Inspect evidence and act autonomously on rejects; old version review cannot approve new output. Includes actual provider usage.',
+     'parameters': obj({'asset_id': ID, 'purpose': {'type': 'string', 'enum': ['master', 'still', 'shot', 'final']},
+                        'entity_id': ID, 'shot_id': ID}, ('asset_id', 'purpose'))},
+    {'name': 'synthesize_speech', 'description': 'Generate genuine Chinese dialogue with fixed Qwen3-TTS 1.7B character voices on the current owned idle GPU, one model load per batch. Each utterance={id,speaker,text,instruct}; speaker is fixed voice Serena/Vivian/Uncle_Fu/Ryan/Aiden/Dylan/Eric/Ono_Anna/Sohee. Returns local audio asset and actual duration per line. Generate dialogue first, then plan shot timings. Never claims lip sync.',
+     'parameters': obj({'task_id': ID, 'utterances': array(obj({'id': ID, 'speaker': string(60), 'text': string(1000), 'instruct': string(1000)},
+        ('id', 'speaker', 'text')), 120)}, ('utterances',))},
+    {'name': 'mix_sound', 'description': 'Mix local dialogue/ambience/music/effect cues into a completed film with real duration/overlap/character voice checks and loudness validation. cues={asset_id,start,gain_db?,role,speaker?,text?,allow_overlap?}; speaker names map to immutable speech voice metadata. Existing media preserved. Post-dubbing does not synchronize lips.',
+     'parameters': obj({'expected_revision': REVISION, 'video_asset_id': ID, 'name': string(100), 'keep_source_audio': {'type': 'boolean'},
+        'cues': array(obj({'asset_id': ID, 'start': {'type': 'number', 'minimum': 0, 'maximum': 600},
+            'gain_db': {'type': 'number', 'minimum': -60, 'maximum': 12},
+            'role': {'type': 'string', 'enum': ['dialogue', 'ambience', 'music', 'effect']},
+            'speaker': string(100), 'text': string(1000), 'allow_overlap': {'type': 'boolean'}}, ('asset_id', 'start', 'role')), 200)},
+        ('expected_revision', 'video_asset_id', 'cues'))},
 ]
 
 
@@ -248,6 +268,8 @@ def capabilities():
         'upscale_models': ['realesrgan', *MODEL_PRESETS], 'upscale_scales': ['2×', '4×'],
         'reference_roles': ['reference', 'base', 'first', 'last'],
         'reference_aliases': '图1、图2、文本1；提示词用 @图1 引用已连接素材',
+        'speech': {'engine': 'Qwen3-TTS-1.7B-CustomVoice', 'voices': ['Serena', 'Vivian', 'Uncle_Fu', 'Ryan', 'Aiden', 'Dylan', 'Eric', 'Ono_Anna', 'Sohee'],
+                   'requires_idle_owned_gpu': True, 'lip_sync': False},
         'execution': 'All generation tools use serial per-account GPU queue. Plan mode never allocates GPU.'}
 
 
@@ -299,6 +321,7 @@ def validate_graph(ctx, canvas):
 
 def edit_canvas(ctx, args):
     project, canvas = current(ctx, args['expected_revision'])
+    before = copy.deepcopy(canvas)
     if not args['operations']:
         raise ValueError('至少提供一个画布操作')
     for operation in args['operations']:
@@ -363,6 +386,7 @@ def edit_canvas(ctx, args):
                 target['data'].update(versions=history, active_version_id=version['id'], asset_id=version['asset_id'],
                     media_type=version['media_type'], job_id=version.get('job_id'), version_selection='manual')
     validate_canvases(project['canvases'])
+    production.guard_locks(before, canvas)
     validate_graph(ctx, canvas)
     revision = commit(ctx, project)
     return {'revision': revision, 'node_ids': [node['id'] for node in canvas['nodes']], 'operations_applied': len(args['operations'])}
@@ -410,6 +434,7 @@ async def execute_tool(name, args, ctx):
                 node['data'].pop('versions', None)
         return {'project_id': ctx.project_id, 'canvas_id': ctx.canvas_id, 'revision': project['revision'],
                 'nodes': nodes, 'edges': canvas['edges'], 'story': canvas.get('agent_story'),
+                'production': canvas.get('production'), 'production_status': production.status(ctx.manager.store, canvas),
                 **({'capabilities': capabilities()} if args.get('include_capabilities', True) else {})}
     if name == 'inspect_assets':
         keys = args.get('asset_ids')
@@ -434,8 +459,50 @@ async def execute_tool(name, args, ctx):
                 agent_media.number(shot['duration'], '镜头时长', 0.1, 600)
         canvas['agent_story'] = story
         return {'revision': commit(ctx, project), 'story': story}
+    if name == 'save_production':
+        project, canvas = current(ctx, args['expected_revision'])
+        value = production.save_plan(canvas, args)
+        return {'revision': commit(ctx, project), 'production': value}
+    if name == 'lock_asset_version':
+        project, canvas = current(ctx, args['expected_revision'])
+        lock = production.lock_asset(ctx.manager.store, canvas, args)
+        return {'revision': commit(ctx, project), 'lock': lock}
+    if name == 'review_media':
+        require_auto(ctx)
+        if ctx.review is None:
+            raise RuntimeError('独立审片服务未配置')
+        from .agent_review import invoke
+        return await invoke(ctx, args)
+    if name == 'synthesize_speech':
+        require_auto(ctx)
+        from .agent_speech import synthesize
+        production.guard_budget(ctx.manager.store, ctx.account)
+        result_id = args.get('task_id') or uuid.uuid5(uuid.NAMESPACE_URL, f'workbench-speech:{ctx.run_id}:{ctx.call_id}').hex
+        try:
+            return await synthesize(ctx, args['utterances'], result_id)
+        except (ValueError, RuntimeError, OSError) as exc:
+            task = ctx.manager.store.get('agent_speech_tasks', result_id, {})
+            return {'error': str(exc), 'retryable': task.get('status') in {'interrupted', 'generated', 'downloading', 'running'},
+                    'speech_task_id': result_id, 'speech_status': task.get('status'),
+                    'completed_count': task.get('completed_count', 0),
+                    'recovery': '相同task_id和原始utterances只恢复原任务；failed需先修复通用基础设施，不能猜测重交'}
+    if name == 'mix_sound':
+        require_auto(ctx)
+        from .agent_sound import mix
+        project, canvas = current(ctx, args['expected_revision'])
+        production.guard_sound(ctx.manager.store, canvas, args['video_asset_id'], args['cues'])
+        result_id = uuid.uuid5(uuid.NAMESPACE_URL, f'workbench-sound:{ctx.run_id}:{ctx.call_id}').hex
+        asset = await mix(ctx.manager.store, args['video_asset_id'], args['cues'], args.get('name', '配音成片'),
+                          result_id=result_id, keep_source_audio=args.get('keep_source_audio', True))
+        result = add_media_node(ctx, asset, asset['name'], args['expected_revision'])
+        if canvas.get('production'):
+            project, canvas = current(ctx)
+            canvas['production']['final_asset_id'] = asset['id']
+            result['revision'] = commit(ctx, project)
+        return result
     if name == 'generate_nodes':
         require_auto(ctx)
+        production.guard_budget(ctx.manager.store, ctx.account)
         if not args['node_ids'] or len(set(args['node_ids'])) != len(args['node_ids']):
             raise ValueError('请指定 1–20 个不同的生成节点')
         # WARN: Job metadata is written by Manager.submit before any GPU worker can start.
@@ -455,6 +522,7 @@ async def execute_tool(name, args, ctx):
         targets = [key for key in args['node_ids'] if key not in reuse]
         if not targets:
             return {'job_id': None, 'job_ids': [], 'reused_nodes': reuse, 'revision': project['revision']}
+        production.guard_generation(ctx.manager.store, canvas, targets)
         def submit(account, graph, label, stop_after, creative):
             creative = {**creative, 'agent_run_id': ctx.run_id, 'agent_call_id': ctx.call_id}
             return ctx.manager.submit(account, graph, label, stop_after, creative=creative)
@@ -486,6 +554,10 @@ async def execute_tool(name, args, ctx):
         return {'job': job_summary(job), 'job_ids': [job['id']]}
     if name == 'server':
         action = args['action']
+        speech_tasks = []
+        if action == 'status' and ctx.mode == 'auto':
+            from .agent_speech import refresh_pending
+            speech_tasks = await refresh_pending(ctx.manager, ctx.account)
         if action == 'logs':
             return {'logs': ctx.manager.store.get('logs', ctx.account, [])[-args.get('limit', 30):]}
         if action == 'connect':
@@ -498,7 +570,8 @@ async def execute_tool(name, args, ctx):
             ctx.manager.request_stop(ctx.account)
         machine = ctx.manager.machine(ctx.account)
         return {'account': ctx.account, 'machine': {key: machine.get(key) for key in ('phase', 'session', 'message', 'stats', 'deployment')},
-                'usage': ctx.manager.store.get('accounts', ctx.account, {}).get('usage')}
+                'usage': ctx.manager.store.get('accounts', ctx.account, {}).get('usage'), 'speech_tasks': speech_tasks,
+                'production_budget': production.budget(ctx.manager.store, ctx.account)}
     if name in {'extract_frame', 'assemble_film'}:
         require_auto(ctx)
         add = name == 'assemble_film' or args.get('add_to_canvas', True)
@@ -519,10 +592,16 @@ async def execute_tool(name, args, ctx):
             asset = await agent_media.extract(ctx.manager.store, args['asset_id'], args.get('time_seconds', 0), label, result_id=result_id)
         else:
             label = args.get('name', '成片')
+            production.guard_assembly(ctx.manager.store, canvas, args['clips'])
             asset = await agent_media.assemble(ctx.manager.store, args['clips'], label, args.get('fps', 24),
                 args.get('width', 1280), args.get('height', 720), result_id=result_id)
         if add:
-            return add_media_node(ctx, asset, label, expected)
+            result = add_media_node(ctx, asset, label, expected)
+            if name == 'assemble_film' and canvas.get('production'):
+                project, canvas = current(ctx)
+                canvas['production']['final_asset_id'] = asset['id']
+                result['revision'] = commit(ctx, project)
+            return result
         return {'asset': asset, 'asset_id': asset['id'], 'asset_url': '/api/assets/' + asset['id'] + '/file'}
     if name == 'manage_project':
         action = args['action']

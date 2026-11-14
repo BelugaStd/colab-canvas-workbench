@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from . import agent_review, production
 from .agent_prompts import DIRECTOR, PROMPT_VERSION
 from .agent_provider import complete
 from .agent_tools import TOOLS, ToolApprovalRequired, ToolContext, execute_tool
@@ -257,9 +258,16 @@ class AgentService:
             if config['protocol'] != run['protocol'] or config['model'] != run['model']:
                 raise ValueError('模型设置已改变，请恢复原设置或新建对话')
             if history and history[-1]['role'] == 'assistant' and not history[-1].get('tool_calls') and not self.pending_calls(history):
-                self.update(key, status='completed', message='已完成', approval=None)
-                return
-            for round_number in range(80):
+                canvas = next(item for item in self.project(session['project_id'])['canvases'] if item['id'] == session['canvas_id'])
+                delivery = production.status(self.store, canvas)
+                if run['mode'] == 'auto' and delivery and not delivery['complete']:
+                    history.append({'role': 'user', 'content': '[自动制作验收门] 原任务尚未通过完整制作验收，请继续自主执行：'
+                                    + json.dumps(delivery, ensure_ascii=False)})
+                else:
+                    self.update(key, status='completed', message='已完成', approval=None)
+                    return
+            completion_rejections = 0
+            for round_number in range(240):
                 pending = self.pending_calls(history)
                 if not pending:
                     history = await self.compact(session, history, config)
@@ -283,6 +291,17 @@ class AgentService:
                     self.event(key, {'id': event_id, 'type': 'message', 'status': 'completed', 'text': response['content']})
                     pending = response['tool_calls']
                     if not pending:
+                        current_project = self.project(session['project_id'])
+                        canvas = next(item for item in current_project['canvases'] if item['id'] == session['canvas_id'])
+                        delivery = production.status(self.store, canvas)
+                        if run['mode'] == 'auto' and delivery and not delivery['complete']:
+                            completion_rejections += 1
+                            if completion_rejections > 3:
+                                raise RuntimeError('制作验收门未通过，已保存成果；不能将未审完整剧集标为完成')
+                            history.append({'role': 'user', 'content': '[自动制作验收门] 当前任务尚未满足交付条件：'
+                                + json.dumps(delivery, ensure_ascii=False) + '。继续通过工具自主完成或明确报告无法解决的阻塞，不能宣称完成。'})
+                            self.save_history(session['id'], history)
+                            continue
                         self.update(key, status='completed', message='已完成', approval=None)
                         return
                 for call in pending:
@@ -309,7 +328,7 @@ class AgentService:
                     project = self.project(session['project_id'])
                     self.update(key, project_revision=project['revision'])
                 await asyncio.sleep(0)
-            raise RuntimeError('已达到单轮 80 次模型调用限制，已有成果已保存；可继续对话')
+            raise RuntimeError('已达到单轮 240 次模型调用限制，已有成果已保存；可继续对话')
         except asyncio.CancelledError:
             if self.run(key)['status'] not in TERMINAL:
                 self.update(key, status='interrupted', message='Agent 已暂停，已提交生成与成果保留')
@@ -333,7 +352,7 @@ class AgentService:
         return list(pending.values())
 
     async def invoke_tool(self, name, args, ctx):
-        if ctx.mode == 'plan' and (name in {'generate_nodes', 'resume_job', 'extract_frame', 'assemble_film'}
+        if ctx.mode == 'plan' and (name in {'generate_nodes', 'resume_job', 'extract_frame', 'assemble_film', 'review_media', 'synthesize_speech', 'mix_sound'}
                                    or name == 'server' and args.get('action') in {'connect', 'stop'}):
             raise ValueError('当前是策划模式，不能生成、处理媒体或连接及关闭 GPU；切换自动模式后继续')
         if name != 'get_jobs' or not args.get('wait', True):
@@ -384,11 +403,14 @@ class AgentService:
         key, call_id, name = run['id'], call['id'], call['name']
         if ledger and ledger['status'] == 'completed':
             return ledger['result']
-        replay_safe = (name in {'inspect_canvas', 'inspect_assets', 'get_jobs', 'extract_frame', 'assemble_film', 'cancel_job'}
+        replay_safe = (name in {'inspect_canvas', 'inspect_assets', 'get_jobs', 'extract_frame', 'assemble_film', 'cancel_job', 'synthesize_speech', 'mix_sound'}
                        or name == 'server' and args.get('action') in {'status', 'logs'}
                        or name == 'manage_project' and args.get('action') in {'create_canvas', 'duplicate_canvas'})
         if ledger and ledger['status'] == 'started' and not replay_safe:
             result = self.reconcile(run, call_id) if name == 'generate_nodes' else None
+            if name == 'review_media':
+                saved_id = uuid.uuid5(uuid.NAMESPACE_URL, f'production-review:{key}:{call_id}').hex
+                result = self.store.get('production_reviews', saved_id)
             if result is None:
                 result = {'error': '工具执行结果不确定，已停止自动重放；请检查已有节点和任务。调用：' + name, 'uncertain': True}
             self.store.patch('agent_calls', ledger_id, status='completed', result=result)
@@ -399,6 +421,9 @@ class AgentService:
             ledger = self.store.put('agent_calls', ledger_id, {'id': ledger_id, 'run_id': key, 'call_id': call_id,
                 'name': name, 'status': 'started', 'arguments': args, 'created_at': time.time()})
         ctx = ToolContext(self.manager, session['project_id'], session['canvas_id'], run['account'], key, call_id, mode=run['mode'])
+        async def inspect_media(args):
+            return await agent_review.review(ctx, args, self.manager.http, self.config(), lambda usage: self.record_usage(key, usage))
+        ctx.review = inspect_media
         try:
             if ledger['status'] == 'awaiting_approval':
                 approved = await self.approve_tool(run, call, args, ledger_id)
